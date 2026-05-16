@@ -51,11 +51,15 @@ type cacheEntry struct {
 }
 
 // Reader handles PDF text extraction via pdftotext with in-memory caching.
+// Supports automatic OCR fallback for image-based PDFs using tesseract.
 type Reader struct {
 	docsDir       string
 	pdftotextBin  string
 	pdfinfoBin    string
 	pdfimagesBin  string
+	pdftoppmBin   string
+	tesseractBin  string
+	hasOCR        bool // true if both pdftoppm and tesseract are available
 
 	mu    sync.RWMutex
 	cache map[string]*cacheEntry
@@ -66,6 +70,8 @@ func NewReader(docsDir string) *Reader {
 	pdftotextBin := "pdftotext"
 	pdfinfoBin := "pdfinfo"
 	pdfimagesBin := "pdfimages"
+	pdftoppmBin := "pdftoppm"
+	tesseractBin := "tesseract"
 
 	// Check for Homebrew installation on macOS
 	if _, err := os.Stat("/opt/homebrew/bin/pdftotext"); err == nil {
@@ -77,17 +83,32 @@ func NewReader(docsDir string) *Reader {
 	if _, err := os.Stat("/opt/homebrew/bin/pdfimages"); err == nil {
 		pdfimagesBin = "/opt/homebrew/bin/pdfimages"
 	}
+	if _, err := os.Stat("/opt/homebrew/bin/pdftoppm"); err == nil {
+		pdftoppmBin = "/opt/homebrew/bin/pdftoppm"
+	}
+	if _, err := os.Stat("/opt/homebrew/bin/tesseract"); err == nil {
+		tesseractBin = "/opt/homebrew/bin/tesseract"
+	}
+
+	// Determine OCR availability
+	_, errPdftoppm := exec.LookPath(pdftoppmBin)
+	_, errTesseract := exec.LookPath(tesseractBin)
+	hasOCR := errPdftoppm == nil && errTesseract == nil
 
 	return &Reader{
 		docsDir:      docsDir,
 		pdftotextBin: pdftotextBin,
 		pdfinfoBin:   pdfinfoBin,
 		pdfimagesBin: pdfimagesBin,
+		pdftoppmBin:  pdftoppmBin,
+		tesseractBin: tesseractBin,
+		hasOCR:       hasOCR,
 		cache:        make(map[string]*cacheEntry),
 	}
 }
 
 // CheckDependencies verifies that pdftotext, pdfinfo, and pdfimages are available.
+// Returns errors for required tools, logs warnings for optional OCR tools.
 func (r *Reader) CheckDependencies() error {
 	if _, err := exec.LookPath(r.pdftotextBin); err != nil {
 		return fmt.Errorf("pdftotext not found at %s: install poppler (brew install poppler)", r.pdftotextBin)
@@ -99,6 +120,23 @@ func (r *Reader) CheckDependencies() error {
 		return fmt.Errorf("pdfimages not found at %s: install poppler (brew install poppler)", r.pdfimagesBin)
 	}
 	return nil
+}
+
+// CheckOCRDependencies returns warnings for missing OCR tools. Not fatal.
+func (r *Reader) CheckOCRDependencies() []string {
+	var warnings []string
+	if _, err := exec.LookPath(r.pdftoppmBin); err != nil {
+		warnings = append(warnings, fmt.Sprintf("pdftoppm not found at %s: OCR will not be available (brew install poppler)", r.pdftoppmBin))
+	}
+	if _, err := exec.LookPath(r.tesseractBin); err != nil {
+		warnings = append(warnings, fmt.Sprintf("tesseract not found at %s: OCR will not be available (brew install tesseract)", r.tesseractBin))
+	}
+	return warnings
+}
+
+// HasOCR returns whether OCR capabilities are available.
+func (r *Reader) HasOCR() bool {
+	return r.hasOCR
 }
 
 // sanitizeFilename ensures the filename is safe (no directory traversal) and is a .pdf file.
@@ -177,6 +215,7 @@ func (r *Reader) getPageCount(path string) int {
 }
 
 // ReadDocument extracts text from a PDF file. If page > 0, only that page is returned.
+// Automatically falls back to OCR if pdftotext returns empty text.
 func (r *Reader) ReadDocument(filename string, page int) (string, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
@@ -189,7 +228,12 @@ func (r *Reader) ReadDocument(filename string, page int) (string, error) {
 	}
 
 	if page > 0 {
-		return r.extractPage(path, page, page)
+		text, method, err := r.readWithOCRFallback(path, page, page)
+		if err != nil {
+			return "", err
+		}
+		_ = method // method info available for logging if needed
+		return text, nil
 	}
 
 	return r.extractFull(safe, path)
@@ -212,11 +256,13 @@ func (r *Reader) ReadDocumentPages(filename, pagesStr string) (string, error) {
 }
 
 // ReadFile extracts full text from an arbitrary PDF file path (used for URL downloads).
+// Automatically falls back to OCR if pdftotext returns empty text.
 func (r *Reader) ReadFile(path string) (string, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return "", fmt.Errorf("file not found: %s", path)
 	}
-	return r.runPdftotext(path, 0, 0)
+	text, _, err := r.readWithOCRFallback(path, 0, 0)
+	return text, err
 }
 
 // ReadFilePages extracts text from specific page ranges of an arbitrary PDF file path.
@@ -268,6 +314,7 @@ func parsePageRanges(pagesStr string) ([][2]int, error) {
 }
 
 // extractPageRanges extracts text from multiple page ranges and combines the results.
+// Falls back to OCR if pdftotext returns empty text.
 func (r *Reader) extractPageRanges(path, pagesStr string) (string, error) {
 	ranges, err := parsePageRanges(pagesStr)
 	if err != nil {
@@ -276,7 +323,7 @@ func (r *Reader) extractPageRanges(path, pagesStr string) (string, error) {
 
 	var parts []string
 	for _, rng := range ranges {
-		text, err := r.runPdftotext(path, rng[0], rng[1])
+		text, _, err := r.readWithOCRFallback(path, rng[0], rng[1])
 		if err != nil {
 			return "", fmt.Errorf("error extracting pages %d-%d: %w", rng[0], rng[1], err)
 		}
@@ -287,6 +334,7 @@ func (r *Reader) extractPageRanges(path, pagesStr string) (string, error) {
 }
 
 // extractFull extracts the full text of a PDF, using cache when possible.
+// Falls back to OCR if pdftotext returns empty text.
 func (r *Reader) extractFull(filename, path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -302,8 +350,8 @@ func (r *Reader) extractFull(filename, path string) (string, error) {
 	}
 	r.mu.RUnlock()
 
-	// Extract text
-	text, err := r.runPdftotext(path, 0, 0)
+	// Extract text with OCR fallback
+	text, _, err := r.readWithOCRFallback(path, 0, 0)
 	if err != nil {
 		return "", err
 	}
@@ -338,6 +386,187 @@ func (r *Reader) runPdftotext(path string, firstPage, lastPage int) (string, err
 		return "", fmt.Errorf("pdftotext failed: %w", err)
 	}
 	return string(out), nil
+}
+
+// isTextEmpty returns true if text has fewer than 50 non-whitespace characters
+// per page, indicating an image-based PDF that pdftotext cannot extract.
+func isTextEmpty(text string, pageCount int) bool {
+	if pageCount < 1 {
+		pageCount = 1
+	}
+	nonWS := 0
+	for _, c := range text {
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f' {
+			nonWS++
+		}
+	}
+	threshold := 50 * pageCount
+	return nonWS < threshold
+}
+
+// ocrPage runs OCR on a single page of a PDF using pdftoppm + tesseract.
+// Uses TIFF format with temp files, piping the TIFF data via stdin to tesseract
+// to work around leptonica file-open bugs on macOS.
+func (r *Reader) ocrPage(path string, page int, language string) (string, error) {
+	if language == "" {
+		language = "eng"
+	}
+
+	// Create temp dir for the TIFF file
+	tmpDir, err := os.MkdirTemp("", "go-pdf-mcp-ocr-")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	prefix := filepath.Join(tmpDir, "page")
+
+	// pdftoppm -tiff -r 200 -f N -l N -singlefile <pdf> <prefix>
+	// This creates <prefix>.tif
+	pdftoppmArgs := []string{"-tiff", "-r", "200", "-f", strconv.Itoa(page), "-l", strconv.Itoa(page), "-singlefile", path, prefix}
+	pdftoppmCmd := exec.Command(r.pdftoppmBin, pdftoppmArgs...)
+	if out, err := pdftoppmCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("pdftoppm failed on page %d: %w (output: %s)", page, err, string(out))
+	}
+
+	tiffPath := prefix + ".tif"
+	if _, err := os.Stat(tiffPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("pdftoppm did not produce output for page %d", page)
+	}
+
+	// Pipe TIFF data via stdin to tesseract to work around leptonica bug
+	// where tesseract cannot open files directly on some macOS installations
+	tiffData, err := os.Open(tiffPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open TIFF file: %w", err)
+	}
+	defer tiffData.Close()
+
+	tesseractArgs := []string{"stdin", "stdout", "-l", language}
+	tesseractCmd := exec.Command(r.tesseractBin, tesseractArgs...)
+	tesseractCmd.Stdin = tiffData
+
+	var tesseractOut strings.Builder
+	var tesseractErr strings.Builder
+	tesseractCmd.Stdout = &tesseractOut
+	tesseractCmd.Stderr = &tesseractErr
+
+	if err := tesseractCmd.Run(); err != nil {
+		if tesseractOut.Len() > 0 {
+			return tesseractOut.String(), nil
+		}
+		return "", fmt.Errorf("tesseract failed on page %d: %w (stderr: %s)", page, err, tesseractErr.String())
+	}
+
+	return tesseractOut.String(), nil
+}
+
+// ocrDocument runs OCR on all pages (or a specific page) of a PDF.
+// Returns the extracted text and the method used.
+func (r *Reader) ocrDocument(path string, page int, language string) (string, error) {
+	if !r.hasOCR {
+		return "", fmt.Errorf("OCR not available: tesseract and/or pdftoppm not installed")
+	}
+
+	if page > 0 {
+		return r.ocrPage(path, page, language)
+	}
+
+	// Get total page count
+	totalPages := r.getPageCount(path)
+	if totalPages == 0 {
+		// Fallback: try just page 1
+		totalPages = 1
+	}
+
+	var parts []string
+	for p := 1; p <= totalPages; p++ {
+		text, err := r.ocrPage(path, p, language)
+		if err != nil {
+			// Log but continue with other pages
+			parts = append(parts, fmt.Sprintf("[OCR failed on page %d: %v]", p, err))
+			continue
+		}
+		if p > 1 {
+			parts = append(parts, fmt.Sprintf("\n--- Page %d ---\n", p))
+		}
+		parts = append(parts, text)
+	}
+
+	return strings.Join(parts, ""), nil
+}
+
+// OCRDocument performs OCR on a document in the configured directory.
+// Forces OCR regardless of whether pdftotext works. Useful for garbled text.
+func (r *Reader) OCRDocument(filename string, page int, language string) (string, error) {
+	safe, err := r.sanitizeFilename(filename)
+	if err != nil {
+		return "", err
+	}
+
+	path := r.fullPath(safe)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return "", fmt.Errorf("document not found: %s", safe)
+	}
+
+	return r.ocrDocument(path, page, language)
+}
+
+// readWithOCRFallback extracts text from a PDF, falling back to OCR if pdftotext
+// returns empty/whitespace-only text. Returns the text and extraction method used.
+func (r *Reader) readWithOCRFallback(path string, firstPage, lastPage int) (text string, method string, err error) {
+	text, err = r.runPdftotext(path, firstPage, lastPage)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Determine page count for threshold calculation
+	pageCount := 1
+	if firstPage > 0 && lastPage > 0 {
+		pageCount = lastPage - firstPage + 1
+	} else if firstPage == 0 && lastPage == 0 {
+		pageCount = r.getPageCount(path)
+		if pageCount == 0 {
+			pageCount = 1
+		}
+	}
+
+	if !isTextEmpty(text, pageCount) {
+		return text, "pdftotext", nil
+	}
+
+	// Text is empty or near-empty; try OCR fallback
+	if !r.hasOCR {
+		return text, "pdftotext (empty, no OCR available)", nil
+	}
+
+	page := 0
+	if firstPage > 0 && firstPage == lastPage {
+		page = firstPage
+	}
+	// For ranges, OCR all pages in range
+	if firstPage > 0 && lastPage > firstPage {
+		var parts []string
+		for p := firstPage; p <= lastPage; p++ {
+			ocrText, ocrErr := r.ocrPage(path, p, "eng")
+			if ocrErr != nil {
+				parts = append(parts, fmt.Sprintf("[OCR failed on page %d: %v]", p, ocrErr))
+				continue
+			}
+			if p > firstPage {
+				parts = append(parts, fmt.Sprintf("\n--- Page %d ---\n", p))
+			}
+			parts = append(parts, ocrText)
+		}
+		return strings.Join(parts, ""), "ocr", nil
+	}
+
+	ocrText, ocrErr := r.ocrDocument(path, page, "eng")
+	if ocrErr != nil {
+		// Return the original (possibly empty) pdftotext result
+		return text, "pdftotext (OCR fallback failed)", nil
+	}
+	return ocrText, "ocr", nil
 }
 
 // SearchDocument searches a document for lines matching the query (case-insensitive).

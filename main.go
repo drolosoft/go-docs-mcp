@@ -55,14 +55,24 @@ func main() {
 		log.Printf("WARNING: %v", err)
 	}
 
+	// Check OCR dependencies (optional, warn only)
+	for _, warning := range reader.CheckOCRDependencies() {
+		log.Printf("WARNING: %s", warning)
+	}
+	if reader.HasOCR() {
+		log.Printf("OCR support enabled (tesseract + pdftoppm available)")
+	} else {
+		log.Printf("OCR support disabled (install tesseract and poppler for OCR)")
+	}
+
 	// Create MCP server
 	s := server.NewMCPServer(
 		"go-pdf-mcp",
-		"2.0.0",
+		"3.0.0",
 		server.WithToolCapabilities(true),
 	)
 
-	// Register tools (7 total)
+	// Register tools (8 total)
 	registerListDocuments(s, reader)
 	registerReadDocument(s, reader)
 	registerSearchDocument(s, reader)
@@ -70,6 +80,7 @@ func main() {
 	registerGetDocumentMetadata(s, reader)
 	registerExtractImages(s, reader)
 	registerReadURL(s, reader)
+	registerOCRDocument(s, reader)
 
 	// Run stdio transport
 	stdio := server.NewStdioServer(s)
@@ -282,6 +293,47 @@ func registerReadURL(s *server.MCPServer, reader *pdf.Reader) {
 		text, err := downloadAndReadPDF(reader, url, pagesStr)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error reading URL: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(text), nil
+	})
+}
+
+func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
+	tool := mcp.NewTool("ocr_document",
+		mcp.WithDescription("Force OCR text extraction on a PDF document, bypassing pdftotext. Useful for image-based/scanned PDFs or when pdftotext returns garbled text. Requires tesseract and pdftoppm."),
+		mcp.WithString("filename",
+			mcp.Required(),
+			mcp.Description("The PDF filename to OCR"),
+		),
+		mcp.WithNumber("page",
+			mcp.Description("Optional page number to OCR (1-based). If omitted, OCRs all pages."),
+		),
+		mcp.WithString("language",
+			mcp.Description("Tesseract language code (default: \"eng\"). Use \"spa\" for Spanish, \"fra\" for French, etc. Run 'tesseract --list-langs' to see available languages."),
+		),
+	)
+
+	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if !reader.HasOCR() {
+			return mcp.NewToolResultError("OCR not available: tesseract and/or pdftoppm not installed. Install with: brew install tesseract poppler"), nil
+		}
+
+		filename, err := request.RequireString("filename")
+		if err != nil {
+			return mcp.NewToolResultError("filename parameter is required"), nil
+		}
+
+		page := request.GetInt("page", 0)
+		language := request.GetString("language", "eng")
+
+		text, err := reader.OCRDocument(filename, page, language)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("OCR error: %v", err)), nil
+		}
+
+		if strings.TrimSpace(text) == "" {
+			return mcp.NewToolResultText("[OCR completed but no text was detected on the page(s)]"), nil
 		}
 
 		return mcp.NewToolResultText(text), nil

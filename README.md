@@ -1,64 +1,108 @@
-# go-pdf-mcp
+<p align="center">
+  <img src="assets/icon.png" alt="go-pdf-mcp" width="128" height="128">
+</p>
 
-[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-compatible-blue)](https://modelcontextprotocol.io)
+<h1 align="center">go-pdf-mcp</h1>
 
-**Go MCP server for PDF document access** — read, search, extract images, and fetch PDFs from URLs for LLMs via the [Model Context Protocol](https://modelcontextprotocol.io).
+<p align="center">
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go&logoColor=white" alt="Go"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-compatible-blue" alt="MCP"></a>
+</p>
+
+> **Install and Go.** One command, single binary, no Node, no Python, no config. Your AI reads PDFs.
+
+Go MCP server for PDF document access — read, search, extract images, and fetch PDFs from URLs via the [Model Context Protocol](https://modelcontextprotocol.io).
+
+```bash
+go install github.com/drolosoft/go-pdf-mcp@latest
+# That's it. 10MB binary, starts in milliseconds.
+```
 
 ---
 
-## Features
+## 🏆 Why go-pdf-mcp?
+
+| Feature | go-pdf-mcp | SylphxAI (TS) | hanweg (Python) | kreuzberg (Rust) |
+|---------|:---:|:---:|:---:|:---:|
+| Single binary install | ✅ | ❌ | ❌ | ❌ |
+| `go install` one-liner | ✅ | ❌ | ❌ | ❌ |
+| No Node/Python runtime | ✅ | ❌ | ❌ | ✅ |
+| Read from URL | ✅ | ❌ | ❌ | ❌ |
+| OCR for scanned PDFs | ✅ | ❌ | ❌ | ✅ |
+| Image extraction (base64) | ✅ | ❌ | ❌ | ✅ |
+| Page range syntax | ✅ | ✅ | ❌ | ❌ |
+| Full-text search | ✅ | ❌ | ✅ | ✅ |
+| Self-hosted / offline | ✅ | ✅ | ✅ | ✅ |
+| License | MIT | MIT | MIT | MIT |
+
+---
+
+## 📋 Features
 
 | Tool | Description |
 |------|-------------|
 | `list_documents` | List all available PDFs with metadata (filename, title, page count, size) |
-| `read_document` | Read full text, a specific page, or page ranges from a PDF |
+| `read_document` | Read full text, a specific page, or page ranges from a PDF (auto-OCR fallback) |
 | `search_document` | Case-insensitive full-text search with context and page hints |
 | `get_document_summary` | Get the first 3 pages of text as a quick overview |
 | `get_document_metadata` | Get full PDF metadata (title, author, dates, version, etc.) |
 | `extract_images` | Extract images from a PDF as base64-encoded data (max 10 per call) |
 | `read_url` | Download a PDF from a URL and extract its text content |
+| `ocr_document` | Force OCR on a PDF — for scanned/image-based documents or garbled text |
 
 - **Fast** — mtime-based in-memory caching avoids redundant extraction
+- **OCR** — automatic fallback to tesseract for image-based/scanned PDFs
 - **Secure** — directory-locked access with path traversal prevention, `.pdf` only
 - **Simple** — single binary, stdio transport, zero configuration required
 - **Portable** — works on macOS and Linux with poppler utilities
 
-## Prerequisites
+---
+
+## 📦 Prerequisites
 
 - **Go 1.22+** ([install](https://go.dev/doc/install))
-- **poppler** (provides `pdftotext`, `pdfinfo`, and `pdfimages`)
+- **poppler** (provides `pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`)
+- **tesseract** _(optional, for OCR support)_
 
 ```bash
 # macOS
 brew install poppler
+brew install tesseract        # optional: enables OCR for scanned PDFs
 
 # Debian/Ubuntu
 apt install poppler-utils
+apt install tesseract-ocr     # optional: enables OCR for scanned PDFs
 
 # Fedora/RHEL
 dnf install poppler-utils
+dnf install tesseract         # optional: enables OCR for scanned PDFs
 ```
 
-## Installation
+> **OCR note:** Without tesseract, everything works except OCR. Scanned/image-based PDFs will return empty text. With tesseract installed, `read_document` automatically detects image-based pages and falls back to OCR. The `ocr_document` tool lets you force OCR on any document.
+
+---
+
+## 🚀 Installation
 
 ### From source
 
 ```bash
-go install github.com/juanatsap/go-pdf-mcp@latest
+go install github.com/drolosoft/go-pdf-mcp@latest
 ```
 
 ### Build locally
 
 ```bash
-git clone https://github.com/juanatsap/go-pdf-mcp.git
+git clone https://github.com/drolosoft/go-pdf-mcp.git
 cd go-pdf-mcp
 make build      # produces ./go-pdf-mcp
 make install    # installs to /usr/local/bin/
 ```
 
-## Configuration
+---
+
+## ⚙️ Configuration
 
 The server reads PDFs from a documents directory. Set `PDF_MCP_DIR` to change it:
 
@@ -69,7 +113,9 @@ The server reads PDFs from a documents directory. Set `PDF_MCP_DIR` to change it
 
 Place your PDF files in the documents directory and the server will find them automatically.
 
-## Usage
+---
+
+## 💡 Usage
 
 ### With Claude Code
 
@@ -113,7 +159,9 @@ The server communicates over **stdio** using JSON-RPC 2.0. Launch the binary and
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | go-pdf-mcp
 ```
 
-## Tool Reference
+---
+
+## 📖 Tool Reference
 
 ### `list_documents`
 
@@ -137,7 +185,7 @@ Lists all PDF files in the configured documents directory.
 
 ### `read_document`
 
-Reads the extracted text content of a PDF document.
+Reads the extracted text content of a PDF document. Automatically falls back to OCR if the PDF is image-based/scanned and `pdftotext` returns empty text.
 
 **Parameters:**
 
@@ -268,7 +316,32 @@ Downloads a PDF from a URL and extracts its text content. Maximum file size: 50M
 
 ---
 
-## Security
+### `ocr_document`
+
+Forces OCR (Optical Character Recognition) on a PDF document using tesseract. Useful for scanned/image-based PDFs or when `pdftotext` returns garbled text. Requires `tesseract` and `pdftoppm` to be installed.
+
+> **Note:** `read_document` already auto-detects image-based PDFs and falls back to OCR. Use `ocr_document` when you want to force OCR regardless, or need to specify a non-English language.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `filename` | string | Yes | The PDF filename to OCR |
+| `page` | number | No | Specific page to OCR (1-based). Omit to OCR all pages. |
+| `language` | string | No | Tesseract language code (default: `eng`). Use `spa` for Spanish, `fra` for French, etc. |
+
+**Example input:**
+```json
+{
+  "filename": "scanned-contract.pdf",
+  "page": 1,
+  "language": "spa"
+}
+```
+
+---
+
+## 🔒 Security
 
 - **Directory-locked**: Only files within the configured `PDF_MCP_DIR` are accessible
 - **Path traversal prevention**: Filenames are sanitized to their base component; `../` is rejected
@@ -276,7 +349,9 @@ Downloads a PDF from a URL and extracts its text content. Maximum file size: 50M
 - **No write operations**: The server is strictly read-only
 - **URL downloads**: Limited to 50MB, Content-Type validated, temp files cleaned up immediately
 
-## Development
+---
+
+## 🛠️ Development
 
 ```bash
 make build     # Build the binary
@@ -288,18 +363,28 @@ make clean     # Remove build artifacts
 
 ```
 go-pdf-mcp/
-  main.go              # MCP server setup, 7 tool registrations
+  main.go              # MCP server setup, 8 tool registrations
   internal/
     pdf/
-      reader.go        # PDF extraction, caching, search, metadata, images
+      reader.go        # PDF extraction, caching, search, metadata, images, OCR
   Makefile             # Build targets
   go.mod               # Module definition
 ```
 
-## License
+---
+
+## 📄 License
 
 [MIT](LICENSE) - Copyright 2026 Drolosoft
 
-## Author
+---
 
-Built by [Drolosoft](https://github.com/juanatsap).
+## 💛 Support
+
+<p align="center">
+<a href="https://buymeacoffee.com/juan.andres.morenorub.io"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a>
+</p>
+
+---
+
+**[Drolosoft](https://drolosoft.com)** — *Tools we wish existed*
