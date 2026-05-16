@@ -27,18 +27,18 @@ For a deeper look at why an MCP server beats a direct tool, see **[Why MCP?](doc
 
 | | Capability | go-docs-mcp | Node/TS | Python | Rust |
 |--|-----------|:---:|:---:|:---:|:---:|
-| ⚡ | Single binary, no runtime | ✅ | ❌ | ❌ | ✅ |
-| 📦 | `go install` one-liner | ✅ | ❌ | ❌ | ❌ |
-| 📄 | Multi-format (PDF+TXT+MD+DOCX+CSV) | ✅ | ❌ | ❌ | ❌ |
-| 🔍 | Full-text search with context | ✅ | ⚠️ | ✅ | ✅ |
-| 👁️ | OCR (scanned PDFs + images) | ✅ | ❌ | ❌ | ⚠️ |
-| 🖼️ | Image extraction (base64) | ✅ | ⚠️ | ✅ | ❌ |
-| 📊 | Table extraction | ✅ | ⚠️ | ✅ | ✅ |
-| 📑 | Document outline / TOC | ✅ | ❌ | ❌ | ⚠️ |
-| 🌐 | Fetch documents from URL | ✅ | ⚠️ | ❌ | ❌ |
-| 🔒 | Directory-locked, read-only | ✅ | ⚠️ | ⚠️ | ✅ |
-| 💾 | Smart caching (mtime-based) | ✅ | ❌ | ❌ | ❌ |
-| 🏠 | Self-hosted / fully offline | ✅ | ✅ | ✅ | ✅ |
+| ⚡ | Single binary, no runtime | ✅ | ❌ needs Node | ❌ needs Python | ✅ |
+| 📦 | `go install` one-liner | ✅ | ❌ npm+deps | ❌ pip+venv | ❌ cargo |
+| 📄 | Multi-format (6 types) | ✅ | ❌ one format | ❌ one format | ❌ one format |
+| 🔍 | Full-text search | ✅ | ⚠️ partial | ✅ | ✅ |
+| 👁️ | OCR (scanned PDFs) | ✅ | ❌ | ❌ | ⚠️ partial |
+| 🖼️ | Image extraction | ✅ | ⚠️ partial | ✅ | ❌ |
+| 📊 | Table extraction | ✅ | ⚠️ partial | ✅ | ✅ |
+| 📑 | Document outline | ✅ | ❌ | ❌ | ⚠️ partial |
+| 🌐 | Fetch from URL | ✅ | ⚠️ partial | ❌ | ❌ |
+| 🔒 | Dir-locked, read-only | ✅ | ⚠️ varies | ⚠️ varies | ✅ |
+| 💾 | Smart caching | ✅ | ❌ | ❌ | ❌ |
+| 🏠 | Fully offline | ✅ | ✅ | ✅ | ✅ |
 
 Every other document MCP server handles **one format** — a PDF server for PDFs, a DOCX server for DOCX. You'd need three tools to read three formats. go-docs-mcp reads them all from a single binary.
 
