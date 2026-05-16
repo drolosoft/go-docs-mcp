@@ -1,6 +1,5 @@
 # Binaries
-drolo-mcp-docs
-drolo-docs
+go-pdf-mcp
 *.exe
 *.dll
 *.so

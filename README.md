@@ -1,10 +1,10 @@
-# drolo-mcp-docs
+# go-pdf-mcp
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blue)](https://modelcontextprotocol.io)
 
-**Go MCP server for PDF document access** — read, search, and summarize PDFs for LLMs via the [Model Context Protocol](https://modelcontextprotocol.io).
+**Go MCP server for PDF document access** — read, search, extract images, and fetch PDFs from URLs for LLMs via the [Model Context Protocol](https://modelcontextprotocol.io).
 
 ---
 
@@ -13,9 +13,12 @@
 | Tool | Description |
 |------|-------------|
 | `list_documents` | List all available PDFs with metadata (filename, title, page count, size) |
-| `read_document` | Read full text or a specific page from a PDF |
+| `read_document` | Read full text, a specific page, or page ranges from a PDF |
 | `search_document` | Case-insensitive full-text search with context and page hints |
 | `get_document_summary` | Get the first 3 pages of text as a quick overview |
+| `get_document_metadata` | Get full PDF metadata (title, author, dates, version, etc.) |
+| `extract_images` | Extract images from a PDF as base64-encoded data (max 10 per call) |
+| `read_url` | Download a PDF from a URL and extract its text content |
 
 - **Fast** — mtime-based in-memory caching avoids redundant extraction
 - **Secure** — directory-locked access with path traversal prevention, `.pdf` only
@@ -25,7 +28,7 @@
 ## Prerequisites
 
 - **Go 1.22+** ([install](https://go.dev/doc/install))
-- **poppler** (provides `pdftotext` and `pdfinfo`)
+- **poppler** (provides `pdftotext`, `pdfinfo`, and `pdfimages`)
 
 ```bash
 # macOS
@@ -43,25 +46,26 @@ dnf install poppler-utils
 ### From source
 
 ```bash
-go install github.com/juanatsap/drolo-mcp-docs@latest
+go install github.com/juanatsap/go-pdf-mcp@latest
 ```
 
 ### Build locally
 
 ```bash
-git clone https://github.com/juanatsap/drolo-mcp-docs.git
-cd drolo-mcp-docs
-make build      # produces ./drolo-mcp-docs
+git clone https://github.com/juanatsap/go-pdf-mcp.git
+cd go-pdf-mcp
+make build      # produces ./go-pdf-mcp
 make install    # installs to /usr/local/bin/
 ```
 
 ## Configuration
 
-The server reads PDFs from a documents directory. Set `DROLO_DOCS_DIR` to change it:
+The server reads PDFs from a documents directory. Set `PDF_MCP_DIR` to change it:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DROLO_DOCS_DIR` | `~/.drolo/documents/` | Directory containing PDF files to serve |
+| `PDF_MCP_DIR` | `~/.pdf-mcp/documents/` | Directory containing PDF files to serve |
+| `DROLO_DOCS_DIR` | _(fallback)_ | Backward-compatible alias for `PDF_MCP_DIR` |
 
 Place your PDF files in the documents directory and the server will find them automatically.
 
@@ -74,10 +78,10 @@ Add to your `.claude/settings.json`:
 ```json
 {
   "mcpServers": {
-    "drolo-docs": {
-      "command": "drolo-mcp-docs",
+    "pdf": {
+      "command": "go-pdf-mcp",
       "env": {
-        "DROLO_DOCS_DIR": "/path/to/your/pdfs"
+        "PDF_MCP_DIR": "/path/to/your/pdfs"
       }
     }
   }
@@ -91,10 +95,10 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 ```json
 {
   "mcpServers": {
-    "drolo-docs": {
-      "command": "/usr/local/bin/drolo-mcp-docs",
+    "pdf": {
+      "command": "/usr/local/bin/go-pdf-mcp",
       "env": {
-        "DROLO_DOCS_DIR": "/path/to/your/pdfs"
+        "PDF_MCP_DIR": "/path/to/your/pdfs"
       }
     }
   }
@@ -106,7 +110,7 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 The server communicates over **stdio** using JSON-RPC 2.0. Launch the binary and pipe JSON-RPC messages to stdin:
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | drolo-mcp-docs
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | go-pdf-mcp
 ```
 
 ## Tool Reference
@@ -140,13 +144,14 @@ Reads the extracted text content of a PDF document.
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `filename` | string | Yes | The PDF filename to read |
-| `page` | number | No | Page number (1-based). Omit for full text. |
+| `page` | number | No | Single page number (1-based). Omit for full text. |
+| `pages` | string | No | Page ranges, e.g. "1-5", "10", "1-3,7,10-12". Overrides `page`. |
 
 **Example input:**
 ```json
 {
   "filename": "architecture-guide.pdf",
-  "page": 1
+  "pages": "1-3,10-12"
 }
 ```
 
@@ -187,12 +192,89 @@ Returns the text from the first 3 pages of a document as a quick summary.
 
 ---
 
+### `get_document_metadata`
+
+Returns full PDF metadata extracted via `pdfinfo`.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `filename` | string | Yes | The PDF filename to get metadata for |
+
+**Example output:**
+```json
+{
+  "title": "Architecture Guide",
+  "author": "Jane Doe",
+  "subject": "System Design",
+  "creator": "LaTeX",
+  "producer": "pdfTeX",
+  "creation_date": "Thu May 15 10:30:00 2025",
+  "modification_date": "Thu May 15 10:30:00 2025",
+  "pages": 42,
+  "file_size_bytes": 1048576,
+  "pdf_version": "1.5"
+}
+```
+
+---
+
+### `extract_images`
+
+Extracts images from a PDF document as base64-encoded data. Returns up to 10 images per call.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `filename` | string | Yes | The PDF filename to extract images from |
+| `page` | number | No | Specific page to extract from. Omit for all pages. |
+
+**Example output:**
+```json
+[
+  {
+    "page": 1,
+    "index": 0,
+    "format": "jpeg",
+    "width": 800,
+    "height": 600,
+    "data_base64": "/9j/4AAQSkZJRg..."
+  }
+]
+```
+
+---
+
+### `read_url`
+
+Downloads a PDF from a URL and extracts its text content. Maximum file size: 50MB.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `url` | string | Yes | The URL of the PDF to download and read |
+| `pages` | string | No | Page ranges to extract, e.g. "1-5". Omit for full text. |
+
+**Example input:**
+```json
+{
+  "url": "https://example.com/report.pdf",
+  "pages": "1-3"
+}
+```
+
+---
+
 ## Security
 
-- **Directory-locked**: Only files within the configured `DROLO_DOCS_DIR` are accessible
+- **Directory-locked**: Only files within the configured `PDF_MCP_DIR` are accessible
 - **Path traversal prevention**: Filenames are sanitized to their base component; `../` is rejected
 - **Extension filter**: Only `.pdf` files are served; requests for other file types are denied
 - **No write operations**: The server is strictly read-only
+- **URL downloads**: Limited to 50MB, Content-Type validated, temp files cleaned up immediately
 
 ## Development
 
@@ -205,11 +287,11 @@ make clean     # Remove build artifacts
 ### Project structure
 
 ```
-drolo-mcp-docs/
-  main.go              # MCP server setup, tool registration
+go-pdf-mcp/
+  main.go              # MCP server setup, 7 tool registrations
   internal/
     pdf/
-      reader.go        # PDF extraction, caching, search
+      reader.go        # PDF extraction, caching, search, metadata, images
   Makefile             # Build targets
   go.mod               # Module definition
 ```

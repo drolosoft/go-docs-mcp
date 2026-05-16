@@ -1,13 +1,13 @@
 .PHONY: build install test clean
 
 build:
-	go build -o drolo-mcp-docs .
+	go build -o go-pdf-mcp .
 
 install:
-	go build -o /usr/local/bin/drolo-mcp-docs .
+	go build -o /usr/local/bin/go-pdf-mcp .
 
 test:
 	go test -v -race ./...
 
 clean:
-	rm -f drolo-mcp-docs
+	rm -f go-pdf-mcp

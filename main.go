@@ -4,25 +4,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/juanatsap/drolo-mcp-docs/internal/pdf"
+	"github.com/juanatsap/go-pdf-mcp/internal/pdf"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
+const maxURLFileSize = 50 * 1024 * 1024 // 50MB
+
 func main() {
-	// Determine documents directory
-	docsDir := os.Getenv("DROLO_DOCS_DIR")
+	// Determine documents directory: PDF_MCP_DIR (primary), DROLO_DOCS_DIR (backward compat)
+	docsDir := os.Getenv("PDF_MCP_DIR")
+	if docsDir == "" {
+		docsDir = os.Getenv("DROLO_DOCS_DIR") // backward compatibility
+	}
 	if docsDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			log.Fatalf("cannot determine home directory: %v", err)
 		}
-		docsDir = filepath.Join(home, ".drolo", "documents")
+		docsDir = filepath.Join(home, ".pdf-mcp", "documents")
 	}
 
 	// Expand ~ if present
@@ -50,16 +57,19 @@ func main() {
 
 	// Create MCP server
 	s := server.NewMCPServer(
-		"drolo-docs",
-		"1.0.0",
+		"go-pdf-mcp",
+		"2.0.0",
 		server.WithToolCapabilities(true),
 	)
 
-	// Register tools
+	// Register tools (7 total)
 	registerListDocuments(s, reader)
 	registerReadDocument(s, reader)
 	registerSearchDocument(s, reader)
 	registerGetDocumentSummary(s, reader)
+	registerGetDocumentMetadata(s, reader)
+	registerExtractImages(s, reader)
+	registerReadURL(s, reader)
 
 	// Run stdio transport
 	stdio := server.NewStdioServer(s)
@@ -90,13 +100,16 @@ func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("read_document",
-		mcp.WithDescription("Read the text content of a PDF document. Optionally specify a page number."),
+		mcp.WithDescription("Read the text content of a PDF document. Specify a single page with 'page', or multiple pages with 'pages' (e.g. \"1-5\", \"1-3,7,10-12\"). If neither is provided, returns full text."),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The PDF filename to read"),
 		),
 		mcp.WithNumber("page",
-			mcp.Description("Optional page number to read (1-based). If omitted, returns full text."),
+			mcp.Description("Optional single page number to read (1-based). If omitted, returns full text."),
+		),
+		mcp.WithString("pages",
+			mcp.Description("Optional page ranges to read, e.g. \"1-5\", \"10\", \"1-3,7,10-12\". Overrides 'page' if both provided."),
 		),
 	)
 
@@ -106,8 +119,17 @@ func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError("filename parameter is required"), nil
 		}
 
-		page := request.GetInt("page", 0)
+		// Check for pages range first (takes priority over single page)
+		pagesStr := request.GetString("pages", "")
+		if pagesStr != "" {
+			text, err := reader.ReadDocumentPages(filename, pagesStr)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Error reading document pages: %v", err)), nil
+			}
+			return mcp.NewToolResultText(text), nil
+		}
 
+		page := request.GetInt("page", 0)
 		text, err := reader.ReadDocument(filename, page)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error reading document: %v", err)), nil
@@ -172,4 +194,143 @@ func registerGetDocumentSummary(s *server.MCPServer, reader *pdf.Reader) {
 
 		return mcp.NewToolResultText(text), nil
 	})
+}
+
+func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
+	tool := mcp.NewTool("get_document_metadata",
+		mcp.WithDescription("Get full PDF metadata: title, author, subject, creator, producer, dates, page count, file size, and PDF version."),
+		mcp.WithString("filename",
+			mcp.Required(),
+			mcp.Description("The PDF filename to get metadata for"),
+		),
+	)
+
+	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filename, err := request.RequireString("filename")
+		if err != nil {
+			return mcp.NewToolResultError("filename parameter is required"), nil
+		}
+
+		metadata, err := reader.GetDocumentMetadata(filename)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error getting metadata: %v", err)), nil
+		}
+
+		data, err := json.MarshalIndent(metadata, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling metadata: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(string(data)), nil
+	})
+}
+
+func registerExtractImages(s *server.MCPServer, reader *pdf.Reader) {
+	tool := mcp.NewTool("extract_images",
+		mcp.WithDescription("Extract images from a PDF document as base64-encoded data. Returns up to 10 images per call."),
+		mcp.WithString("filename",
+			mcp.Required(),
+			mcp.Description("The PDF filename to extract images from"),
+		),
+		mcp.WithNumber("page",
+			mcp.Description("Optional page number to extract images from. If omitted, extracts from all pages."),
+		),
+	)
+
+	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filename, err := request.RequireString("filename")
+		if err != nil {
+			return mcp.NewToolResultError("filename parameter is required"), nil
+		}
+
+		page := request.GetInt("page", 0)
+
+		images, err := reader.ExtractImages(filename, page)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error extracting images: %v", err)), nil
+		}
+
+		data, err := json.MarshalIndent(images, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling images: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(string(data)), nil
+	})
+}
+
+func registerReadURL(s *server.MCPServer, reader *pdf.Reader) {
+	tool := mcp.NewTool("read_url",
+		mcp.WithDescription("Download a PDF from a URL and extract its text content. Max file size: 50MB."),
+		mcp.WithString("url",
+			mcp.Required(),
+			mcp.Description("The URL of the PDF to download and read"),
+		),
+		mcp.WithString("pages",
+			mcp.Description("Optional page ranges to read, e.g. \"1-5\", \"10\", \"1-3,7,10-12\". If omitted, returns full text."),
+		),
+	)
+
+	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		url, err := request.RequireString("url")
+		if err != nil {
+			return mcp.NewToolResultError("url parameter is required"), nil
+		}
+
+		pagesStr := request.GetString("pages", "")
+
+		text, err := downloadAndReadPDF(reader, url, pagesStr)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error reading URL: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(text), nil
+	})
+}
+
+func downloadAndReadPDF(reader *pdf.Reader, url, pagesStr string) (string, error) {
+	// Download the PDF
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("failed to download PDF: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+	}
+
+	// Validate content type (allow application/pdf and application/octet-stream)
+	contentType := resp.Header.Get("Content-Type")
+	if contentType != "" &&
+		!strings.Contains(contentType, "application/pdf") &&
+		!strings.Contains(contentType, "application/octet-stream") {
+		return "", fmt.Errorf("unexpected content type: %s (expected application/pdf)", contentType)
+	}
+
+	// Create temp file
+	tmpFile, err := os.CreateTemp("", "go-pdf-mcp-*.pdf")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	// Download with size limit
+	limited := io.LimitReader(resp.Body, maxURLFileSize+1)
+	n, err := io.Copy(tmpFile, limited)
+	if err != nil {
+		return "", fmt.Errorf("failed to download PDF: %w", err)
+	}
+	if n > maxURLFileSize {
+		return "", fmt.Errorf("PDF exceeds maximum size of 50MB")
+	}
+
+	tmpFile.Close()
+
+	// Extract text from the downloaded PDF
+	if pagesStr != "" {
+		return reader.ReadFilePages(tmpFile.Name(), pagesStr)
+	}
+	return reader.ReadFile(tmpFile.Name())
 }
