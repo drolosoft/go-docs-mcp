@@ -25,18 +25,18 @@ For a deeper look at why an MCP server beats a direct tool, see **[Why MCP?](doc
 
 ## 🏆 Why go-docs-mcp?
 
-|  | Capability | go-docs-mcp | Node/TS MCPs | Python MCPs | Rust MCPs |
+| | Capability | go-docs-mcp | Node/TS | Python | Rust |
 |--|-----------|:---:|:---:|:---:|:---:|
-| ⚡ | Single binary, no runtime | ✅ | ❌ Node required | ❌ Python required | ✅ |
-| 📦 | `go install` one-liner | ✅ | ❌ npm + deps | ❌ pip + venv | ❌ cargo build |
-| 📄 | Multi-format (PDF+TXT+MD+DOCX+CSV) | ✅ | ❌ single format | ❌ single format | ❌ single format |
-| 🔍 | Full-text search with context | ✅ | ⚠️ some | ✅ | ✅ |
-| 👁️ | OCR (scanned PDFs + images) | ✅ | ❌ | ❌ | ⚠️ some |
-| 🖼️ | Image extraction (base64) | ✅ | ⚠️ some | ✅ | ❌ |
-| 📊 | Table extraction | ✅ | ⚠️ some | ✅ | ✅ |
-| 📑 | Document outline / TOC | ✅ | ❌ | ❌ | ⚠️ some |
-| 🌐 | Fetch documents from URL | ✅ | ⚠️ some | ❌ | ❌ |
-| 🔒 | Directory-locked, read-only | ✅ | ⚠️ varies | ⚠️ varies | ✅ |
+| ⚡ | Single binary, no runtime | ✅ | ❌ | ❌ | ✅ |
+| 📦 | `go install` one-liner | ✅ | ❌ | ❌ | ❌ |
+| 📄 | Multi-format (PDF+TXT+MD+DOCX+CSV) | ✅ | ❌ | ❌ | ❌ |
+| 🔍 | Full-text search with context | ✅ | ⚠️ | ✅ | ✅ |
+| 👁️ | OCR (scanned PDFs + images) | ✅ | ❌ | ❌ | ⚠️ |
+| 🖼️ | Image extraction (base64) | ✅ | ⚠️ | ✅ | ❌ |
+| 📊 | Table extraction | ✅ | ⚠️ | ✅ | ✅ |
+| 📑 | Document outline / TOC | ✅ | ❌ | ❌ | ⚠️ |
+| 🌐 | Fetch documents from URL | ✅ | ⚠️ | ❌ | ❌ |
+| 🔒 | Directory-locked, read-only | ✅ | ⚠️ | ⚠️ | ✅ |
 | 💾 | Smart caching (mtime-based) | ✅ | ❌ | ❌ | ❌ |
 | 🏠 | Self-hosted / fully offline | ✅ | ✅ | ✅ | ✅ |
 
