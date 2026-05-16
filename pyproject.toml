@@ -1,0 +1,19 @@
+[project]
+name = "drolo-docs"
+version = "0.1.0"
+description = "MCP server that serves PDF documents to Drolo voice AI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "juanatsap", email = "juanatsap@gmail.com" }]
+dependencies = ["mcp>=1.0.0", "pymupdf>=1.24.0"]
+
+[project.scripts]
+drolo-docs = "drolo_docs.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/drolo_docs"]
