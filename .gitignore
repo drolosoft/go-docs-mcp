@@ -1,5 +1,5 @@
 # Binaries
-go-pdf-mcp
+go-docs-mcp
 *.exe
 *.dll
 *.so

@@ -1,13 +1,13 @@
 .PHONY: build install test clean
 
 build:
-	go build -o go-pdf-mcp .
+	go build -o go-docs-mcp .
 
 install:
-	go build -o /usr/local/bin/go-pdf-mcp .
+	go build -o /usr/local/bin/go-docs-mcp .
 
 test:
 	go test -v -race ./...
 
 clean:
-	rm -f go-pdf-mcp
+	rm -f go-docs-mcp

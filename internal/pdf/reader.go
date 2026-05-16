@@ -139,16 +139,45 @@ func (r *Reader) HasOCR() bool {
 	return r.hasOCR
 }
 
-// sanitizeFilename ensures the filename is safe (no directory traversal) and is a .pdf file.
+// supportedExtensions lists all file extensions this tool can work with.
+var supportedExtensions = []string{".pdf", ".txt", ".md", ".csv", ".docx"}
+
+// imageExtensions lists supported image file extensions for OCR.
+var imageExtensions = []string{".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp"}
+
+// sanitizeFilename ensures the filename is safe (no directory traversal) and has a supported extension.
 func (r *Reader) sanitizeFilename(filename string) (string, error) {
 	base := filepath.Base(filename)
 	if base != filename {
 		return "", fmt.Errorf("invalid filename: directory traversal not allowed")
 	}
-	if !strings.HasSuffix(strings.ToLower(base), ".pdf") {
-		return "", fmt.Errorf("invalid filename: only .pdf files are supported")
+	ext := strings.ToLower(filepath.Ext(base))
+	for _, supported := range supportedExtensions {
+		if ext == supported {
+			return base, nil
+		}
 	}
-	return base, nil
+	for _, supported := range imageExtensions {
+		if ext == supported {
+			return base, nil
+		}
+	}
+	return "", fmt.Errorf("invalid filename: unsupported extension %q (supported: %v)", ext, append(supportedExtensions, imageExtensions...))
+}
+
+// sanitizeImageFilename ensures the filename is safe and has an image extension.
+func (r *Reader) sanitizeImageFilename(filename string) (string, error) {
+	base := filepath.Base(filename)
+	if base != filename {
+		return "", fmt.Errorf("invalid filename: directory traversal not allowed")
+	}
+	ext := strings.ToLower(filepath.Ext(base))
+	for _, supported := range imageExtensions {
+		if ext == supported {
+			return base, nil
+		}
+	}
+	return "", fmt.Errorf("invalid filename: unsupported image extension %q (supported: %v)", ext, imageExtensions)
 }
 
 // fullPath returns the full filesystem path for a sanitized filename.
@@ -156,7 +185,7 @@ func (r *Reader) fullPath(filename string) string {
 	return filepath.Join(r.docsDir, filename)
 }
 
-// ListDocuments returns metadata for all PDF files in the documents directory.
+// ListDocuments returns metadata for all supported files in the documents directory.
 func (r *Reader) ListDocuments() ([]DocumentInfo, error) {
 	entries, err := os.ReadDir(r.docsDir)
 	if err != nil {
@@ -169,7 +198,16 @@ func (r *Reader) ListDocuments() ([]DocumentInfo, error) {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".pdf") {
+		ext := strings.ToLower(filepath.Ext(name))
+
+		supported := false
+		for _, se := range supportedExtensions {
+			if ext == se {
+				supported = true
+				break
+			}
+		}
+		if !supported {
 			continue
 		}
 
@@ -178,7 +216,10 @@ func (r *Reader) ListDocuments() ([]DocumentInfo, error) {
 			continue
 		}
 
-		pages := r.getPageCount(filepath.Join(r.docsDir, name))
+		pages := 0
+		if ext == ".pdf" {
+			pages = r.getPageCount(filepath.Join(r.docsDir, name))
+		}
 		title := strings.TrimSuffix(name, filepath.Ext(name))
 
 		docs = append(docs, DocumentInfo{
@@ -413,7 +454,7 @@ func (r *Reader) ocrPage(path string, page int, language string) (string, error)
 	}
 
 	// Create temp dir for the TIFF file
-	tmpDir, err := os.MkdirTemp("", "go-pdf-mcp-ocr-")
+	tmpDir, err := os.MkdirTemp("", "go-docs-mcp-ocr-")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -730,7 +771,7 @@ func (r *Reader) ExtractImages(filename string, page int) ([]ImageInfo, error) {
 // extractImagesFromPath extracts images from an arbitrary PDF path.
 func (r *Reader) extractImagesFromPath(path string, page int) ([]ImageInfo, error) {
 	// Create temp directory for extracted images
-	tmpDir, err := os.MkdirTemp("", "go-pdf-mcp-images-")
+	tmpDir, err := os.MkdirTemp("", "go-docs-mcp-images-")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -829,4 +870,556 @@ func (r *Reader) extractImagesFromPath(path string, page int) ([]ImageInfo, erro
 	}
 
 	return images, nil
+}
+
+// OutlineEntry represents a heading/section in a document outline.
+type OutlineEntry struct {
+	Level int    `json:"level"`
+	Title string `json:"title"`
+	Page  int    `json:"page"`
+}
+
+// TableData represents a table extracted from a document.
+type TableData struct {
+	Page int        `json:"page"`
+	Rows [][]string `json:"rows"`
+}
+
+// FormatInfo describes a supported document format.
+type FormatInfo struct {
+	Extension string `json:"extension"`
+	Status    string `json:"status"`
+	Requires  string `json:"requires"`
+	Installed bool   `json:"installed"`
+}
+
+// ListFormats returns information about supported document formats and dependency status.
+func (r *Reader) ListFormats() []FormatInfo {
+	_, errPdftotext := exec.LookPath(r.pdftotextBin)
+	_, errTesseract := exec.LookPath(r.tesseractBin)
+	_, errPandoc := exec.LookPath("pandoc")
+
+	return []FormatInfo{
+		{Extension: ".pdf", Status: "supported", Requires: "poppler", Installed: errPdftotext == nil},
+		{Extension: ".txt", Status: "supported", Requires: "none", Installed: true},
+		{Extension: ".md", Status: "supported", Requires: "none", Installed: true},
+		{Extension: ".csv", Status: "supported", Requires: "none", Installed: true},
+		{Extension: ".docx", Status: "optional", Requires: "pandoc", Installed: errPandoc == nil},
+		{Extension: ".png/.jpg/.tiff", Status: "optional", Requires: "tesseract", Installed: errTesseract == nil},
+	}
+}
+
+// ReadImage performs OCR on a standalone image file using tesseract directly.
+func (r *Reader) ReadImage(filename string, language string) (string, error) {
+	safe, err := r.sanitizeImageFilename(filename)
+	if err != nil {
+		return "", err
+	}
+
+	path := r.fullPath(safe)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return "", fmt.Errorf("image not found: %s", safe)
+	}
+
+	if _, err := exec.LookPath(r.tesseractBin); err != nil {
+		return "", fmt.Errorf("tesseract not available: install with 'brew install tesseract'")
+	}
+
+	if language == "" {
+		language = "eng"
+	}
+
+	// Open image and pipe to tesseract via stdin
+	imgData, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open image file: %w", err)
+	}
+	defer imgData.Close()
+
+	tesseractArgs := []string{"stdin", "stdout", "-l", language}
+	cmd := exec.Command(r.tesseractBin, tesseractArgs...)
+	cmd.Stdin = imgData
+
+	var stdout strings.Builder
+	var stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if stdout.Len() > 0 {
+			return stdout.String(), nil
+		}
+		return "", fmt.Errorf("tesseract failed: %w (stderr: %s)", err, stderr.String())
+	}
+
+	return stdout.String(), nil
+}
+
+// GetDocumentOutline extracts heading structure from a document.
+func (r *Reader) GetDocumentOutline(filename string) ([]OutlineEntry, error) {
+	safe, err := r.sanitizeFilename(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	path := r.fullPath(safe)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, fmt.Errorf("document not found: %s", safe)
+	}
+
+	ext := strings.ToLower(filepath.Ext(safe))
+
+	switch ext {
+	case ".md":
+		return r.outlineMarkdown(path)
+	case ".txt":
+		return r.outlineMarkdown(path) // try markdown headings in txt files too
+	case ".pdf":
+		return r.outlinePDF(path)
+	default:
+		return nil, fmt.Errorf("outline extraction not supported for %s files", ext)
+	}
+}
+
+// outlineMarkdown parses markdown headings from a file.
+func (r *Reader) outlineMarkdown(path string) ([]OutlineEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	var entries []OutlineEntry
+	lines := strings.Split(string(data), "\n")
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			level := 0
+			for _, ch := range trimmed {
+				if ch == '#' {
+					level++
+				} else {
+					break
+				}
+			}
+			title := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+			if title != "" && level <= 6 {
+				entries = append(entries, OutlineEntry{
+					Level: level,
+					Title: title,
+					Page:  i + 1, // line number as "page" for non-PDF
+				})
+			}
+		}
+	}
+
+	return entries, nil
+}
+
+// outlinePDF extracts heading-like structures from PDF text.
+func (r *Reader) outlinePDF(path string) ([]OutlineEntry, error) {
+	text, err := r.runPdftotext(path, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []OutlineEntry
+	lines := strings.Split(text, "\n")
+	pageNum := 1
+
+	for i, line := range lines {
+		// Track page breaks
+		if strings.Contains(line, "\f") {
+			pageNum++
+		}
+
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		// Skip long lines (not headings)
+		if len(trimmed) >= 80 {
+			continue
+		}
+
+		isHeading := false
+		level := 1
+
+		// Check if followed by a blank line (heading pattern)
+		followedByBlank := (i+1 < len(lines) && strings.TrimSpace(lines[i+1]) == "")
+
+		// ALL-CAPS short lines (< 60 chars)
+		if len(trimmed) < 60 && trimmed == strings.ToUpper(trimmed) && len(trimmed) > 3 {
+			// Verify it has at least some letters
+			hasLetter := false
+			for _, ch := range trimmed {
+				if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
+					hasLetter = true
+					break
+				}
+			}
+			if hasLetter {
+				isHeading = true
+				level = 1
+			}
+		}
+
+		// Numbered section patterns: "1.", "1.1", "1.1.1", "Chapter X"
+		if !isHeading {
+			if matched := matchNumberedHeading(trimmed); matched > 0 {
+				isHeading = true
+				level = matched
+			}
+		}
+
+		// Short line followed by blank (potential heading)
+		if !isHeading && followedByBlank && len(trimmed) < 60 && len(trimmed) > 2 {
+			// Heuristic: doesn't end with common sentence endings
+			if !strings.HasSuffix(trimmed, ".") && !strings.HasSuffix(trimmed, ",") && !strings.HasSuffix(trimmed, ";") {
+				isHeading = true
+				level = 2
+			}
+		}
+
+		if isHeading {
+			entries = append(entries, OutlineEntry{
+				Level: level,
+				Title: trimmed,
+				Page:  pageNum,
+			})
+		}
+	}
+
+	return entries, nil
+}
+
+// matchNumberedHeading checks if a line matches numbered heading patterns.
+// Returns the heading level (1-3) or 0 if no match.
+func matchNumberedHeading(line string) int {
+	// "Chapter X" pattern
+	if strings.HasPrefix(strings.ToLower(line), "chapter ") {
+		return 1
+	}
+	// "Part X" pattern
+	if strings.HasPrefix(strings.ToLower(line), "part ") {
+		return 1
+	}
+
+	// Numbered patterns: "1.", "1.1", "1.1.1"
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return 0
+	}
+	num := parts[0]
+
+	// Count dots to determine level
+	if len(num) > 0 {
+		// Strip trailing dot
+		numClean := strings.TrimRight(num, ".")
+		segments := strings.Split(numClean, ".")
+		allDigits := true
+		for _, seg := range segments {
+			if seg == "" {
+				allDigits = false
+				break
+			}
+			for _, ch := range seg {
+				if ch < '0' || ch > '9' {
+					allDigits = false
+					break
+				}
+			}
+			if !allDigits {
+				break
+			}
+		}
+		if allDigits && len(segments) >= 1 && len(segments) <= 4 {
+			return len(segments)
+		}
+	}
+
+	return 0
+}
+
+// ExtractTables extracts table-like structures from a document.
+func (r *Reader) ExtractTables(filename string, page int) ([]TableData, error) {
+	safe, err := r.sanitizeFilename(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	path := r.fullPath(safe)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, fmt.Errorf("document not found: %s", safe)
+	}
+
+	ext := strings.ToLower(filepath.Ext(safe))
+
+	switch ext {
+	case ".csv":
+		return r.tablesCSV(path)
+	case ".md":
+		return r.tablesMarkdown(path)
+	case ".pdf":
+		return r.tablesPDF(path, page)
+	case ".txt":
+		return r.tablesPlaintext(path)
+	default:
+		return nil, fmt.Errorf("table extraction not supported for %s files", ext)
+	}
+}
+
+// tablesCSV parses the entire CSV file as a single table.
+func (r *Reader) tablesCSV(path string) ([]TableData, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 0 {
+		return []TableData{}, nil
+	}
+
+	var rows [][]string
+	for _, line := range lines {
+		// Simple CSV parsing (handles basic cases)
+		cells := splitCSVLine(line)
+		rows = append(rows, cells)
+	}
+
+	return []TableData{{Page: 1, Rows: rows}}, nil
+}
+
+// splitCSVLine splits a CSV line respecting quoted fields.
+func splitCSVLine(line string) []string {
+	var fields []string
+	var current strings.Builder
+	inQuotes := false
+
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if ch == '"' {
+			if inQuotes && i+1 < len(line) && line[i+1] == '"' {
+				current.WriteByte('"')
+				i++
+			} else {
+				inQuotes = !inQuotes
+			}
+		} else if ch == ',' && !inQuotes {
+			fields = append(fields, strings.TrimSpace(current.String()))
+			current.Reset()
+		} else {
+			current.WriteByte(ch)
+		}
+	}
+	fields = append(fields, strings.TrimSpace(current.String()))
+	return fields
+}
+
+// tablesMarkdown parses pipe-delimited tables from a markdown file.
+func (r *Reader) tablesMarkdown(path string) ([]TableData, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var tables []TableData
+	var currentRows [][]string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "|") && strings.Count(trimmed, "|") >= 2 {
+			// Skip separator lines (e.g., |---|---|)
+			stripped := strings.ReplaceAll(trimmed, "|", "")
+			stripped = strings.ReplaceAll(stripped, "-", "")
+			stripped = strings.ReplaceAll(stripped, ":", "")
+			stripped = strings.TrimSpace(stripped)
+			if stripped == "" {
+				continue // separator line
+			}
+
+			// Parse pipe-delimited row
+			cells := parsePipeRow(trimmed)
+			currentRows = append(currentRows, cells)
+		} else {
+			// End of table
+			if len(currentRows) > 0 {
+				tables = append(tables, TableData{Page: 1, Rows: currentRows})
+				currentRows = nil
+			}
+		}
+	}
+
+	// Don't forget last table
+	if len(currentRows) > 0 {
+		tables = append(tables, TableData{Page: 1, Rows: currentRows})
+	}
+
+	return tables, nil
+}
+
+// parsePipeRow splits a pipe-delimited row into cells.
+func parsePipeRow(line string) []string {
+	// Trim leading/trailing pipes
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "|") {
+		line = line[1:]
+	}
+	if strings.HasSuffix(line, "|") {
+		line = line[:len(line)-1]
+	}
+
+	parts := strings.Split(line, "|")
+	var cells []string
+	for _, p := range parts {
+		cells = append(cells, strings.TrimSpace(p))
+	}
+	return cells
+}
+
+// tablesPDF extracts table-like structures from PDF text using layout analysis.
+func (r *Reader) tablesPDF(path string, page int) ([]TableData, error) {
+	var text string
+	var err error
+	if page > 0 {
+		text, err = r.runPdftotext(path, page, page)
+	} else {
+		text, err = r.runPdftotext(path, 0, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return r.detectTablesFromLayout(text, page), nil
+}
+
+// tablesPlaintext extracts table-like structures from plain text files.
+func (r *Reader) tablesPlaintext(path string) ([]TableData, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	return r.detectTablesFromLayout(string(data), 0), nil
+}
+
+// detectTablesFromLayout detects table-like patterns in text with spatial layout.
+func (r *Reader) detectTablesFromLayout(text string, startPage int) []TableData {
+	lines := strings.Split(text, "\n")
+	pageNum := startPage
+	if pageNum == 0 {
+		pageNum = 1
+	}
+
+	var tables []TableData
+	var currentRows [][]string
+	currentPage := pageNum
+
+	for _, line := range lines {
+		// Track page breaks
+		if strings.Contains(line, "\f") {
+			if len(currentRows) >= 2 {
+				tables = append(tables, TableData{Page: currentPage, Rows: currentRows})
+			}
+			currentRows = nil
+			pageNum++
+			currentPage = pageNum
+			continue
+		}
+
+		row := detectTableRow(line)
+		if row != nil && len(row) >= 2 {
+			if currentRows == nil {
+				currentPage = pageNum
+			}
+			currentRows = append(currentRows, row)
+		} else {
+			// End of potential table (need at least 2 rows)
+			if len(currentRows) >= 2 {
+				tables = append(tables, TableData{Page: currentPage, Rows: currentRows})
+			}
+			currentRows = nil
+		}
+	}
+
+	// Don't forget last table
+	if len(currentRows) >= 2 {
+		tables = append(tables, TableData{Page: currentPage, Rows: currentRows})
+	}
+
+	return tables
+}
+
+// detectTableRow checks if a line looks like a table row and returns its cells.
+func detectTableRow(line string) []string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return nil
+	}
+
+	// Pipe-delimited
+	if strings.Contains(trimmed, "|") && strings.Count(trimmed, "|") >= 2 {
+		// Skip separator lines
+		stripped := strings.ReplaceAll(trimmed, "|", "")
+		stripped = strings.ReplaceAll(stripped, "-", "")
+		stripped = strings.ReplaceAll(stripped, ":", "")
+		stripped = strings.TrimSpace(stripped)
+		if stripped == "" {
+			return nil
+		}
+		return parsePipeRow(trimmed)
+	}
+
+	// Tab-delimited
+	if strings.Contains(line, "\t") {
+		parts := strings.Split(line, "\t")
+		if len(parts) >= 2 {
+			var cells []string
+			for _, p := range parts {
+				cells = append(cells, strings.TrimSpace(p))
+			}
+			return cells
+		}
+	}
+
+	// Multi-space delimited (3+ spaces between columns)
+	if strings.Contains(line, "   ") {
+		parts := splitMultiSpace(line)
+		if len(parts) >= 2 {
+			return parts
+		}
+	}
+
+	return nil
+}
+
+// splitMultiSpace splits a line by runs of 3+ spaces.
+func splitMultiSpace(line string) []string {
+	var parts []string
+	var current strings.Builder
+	spaceCount := 0
+
+	for _, ch := range line {
+		if ch == ' ' {
+			spaceCount++
+		} else {
+			if spaceCount >= 3 && current.Len() > 0 {
+				parts = append(parts, strings.TrimSpace(current.String()))
+				current.Reset()
+			} else {
+				for i := 0; i < spaceCount; i++ {
+					current.WriteByte(' ')
+				}
+			}
+			spaceCount = 0
+			current.WriteRune(ch)
+		}
+	}
+	if current.Len() > 0 {
+		parts = append(parts, strings.TrimSpace(current.String()))
+	}
+	return parts
 }

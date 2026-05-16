@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/juanatsap/go-pdf-mcp/internal/pdf"
+	"github.com/drolosoft/go-docs-mcp/internal/pdf"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -19,17 +19,20 @@ import (
 const maxURLFileSize = 50 * 1024 * 1024 // 50MB
 
 func main() {
-	// Determine documents directory: PDF_MCP_DIR (primary), DROLO_DOCS_DIR (backward compat)
-	docsDir := os.Getenv("PDF_MCP_DIR")
+	// Determine documents directory: DOCS_MCP_DIR (primary), PDF_MCP_DIR (backward compat), DROLO_DOCS_DIR (legacy)
+	docsDir := os.Getenv("DOCS_MCP_DIR")
 	if docsDir == "" {
-		docsDir = os.Getenv("DROLO_DOCS_DIR") // backward compatibility
+		docsDir = os.Getenv("PDF_MCP_DIR") // backward compat
+	}
+	if docsDir == "" {
+		docsDir = os.Getenv("DROLO_DOCS_DIR") // legacy
 	}
 	if docsDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			log.Fatalf("cannot determine home directory: %v", err)
 		}
-		docsDir = filepath.Join(home, ".pdf-mcp", "documents")
+		docsDir = filepath.Join(home, ".docs-mcp", "documents")
 	}
 
 	// Expand ~ if present
@@ -67,12 +70,12 @@ func main() {
 
 	// Create MCP server
 	s := server.NewMCPServer(
-		"go-pdf-mcp",
-		"3.0.0",
+		"go-docs-mcp",
+		"4.0.0",
 		server.WithToolCapabilities(true),
 	)
 
-	// Register tools (8 total)
+	// Register tools (12 total)
 	registerListDocuments(s, reader)
 	registerReadDocument(s, reader)
 	registerSearchDocument(s, reader)
@@ -81,6 +84,10 @@ func main() {
 	registerExtractImages(s, reader)
 	registerReadURL(s, reader)
 	registerOCRDocument(s, reader)
+	registerListFormats(s, reader)
+	registerReadImage(s, reader)
+	registerGetDocumentOutline(s, reader)
+	registerExtractTables(s, reader)
 
 	// Run stdio transport
 	stdio := server.NewStdioServer(s)
@@ -91,7 +98,7 @@ func main() {
 
 func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("list_documents",
-		mcp.WithDescription("List all available PDF documents with metadata (filename, title, pages, size)"),
+		mcp.WithDescription("List all available documents with metadata (filename, format, pages, size). Supports PDF, TXT, MD, CSV, DOCX, and images."),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -111,10 +118,10 @@ func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("read_document",
-		mcp.WithDescription("Read the text content of a PDF document. Specify a single page with 'page', or multiple pages with 'pages' (e.g. \"1-5\", \"1-3,7,10-12\"). If neither is provided, returns full text."),
+		mcp.WithDescription("Read the text content of a document. Supports PDF, TXT, MD, CSV, DOCX. Specify a single page with 'page', or multiple pages with 'pages' (e.g. \"1-5\", \"1-3,7,10-12\"). If neither is provided, returns full text. Auto-OCR fallback for scanned PDFs."),
 		mcp.WithString("filename",
 			mcp.Required(),
-			mcp.Description("The PDF filename to read"),
+			mcp.Description("The document filename to read"),
 		),
 		mcp.WithNumber("page",
 			mcp.Description("Optional single page number to read (1-based). If omitted, returns full text."),
@@ -152,10 +159,10 @@ func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerSearchDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("search_document",
-		mcp.WithDescription("Search for text within a PDF document. Returns matching lines with context and approximate page numbers."),
+		mcp.WithDescription("Search for text within a document. Returns matching lines with context and approximate page numbers."),
 		mcp.WithString("filename",
 			mcp.Required(),
-			mcp.Description("The PDF filename to search"),
+			mcp.Description("The document filename to search"),
 		),
 		mcp.WithString("query",
 			mcp.Required(),
@@ -185,10 +192,10 @@ func registerSearchDocument(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerGetDocumentSummary(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("get_document_summary",
-		mcp.WithDescription("Get a summary of a PDF document (first 3 pages of text)."),
+		mcp.WithDescription("Get a summary of a document (first 3 pages or ~100 lines of text)."),
 		mcp.WithString("filename",
 			mcp.Required(),
-			mcp.Description("The PDF filename to summarize"),
+			mcp.Description("The document filename to summarize"),
 		),
 	)
 
@@ -209,10 +216,10 @@ func registerGetDocumentSummary(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("get_document_metadata",
-		mcp.WithDescription("Get full PDF metadata: title, author, subject, creator, producer, dates, page count, file size, and PDF version."),
+		mcp.WithDescription("Get document metadata: title, author, dates, page count, file size. Full PDF-specific metadata (subject, creator, producer, version) for PDF files."),
 		mcp.WithString("filename",
 			mcp.Required(),
-			mcp.Description("The PDF filename to get metadata for"),
+			mcp.Description("The document filename to get metadata for"),
 		),
 	)
 
@@ -238,10 +245,10 @@ func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerExtractImages(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("extract_images",
-		mcp.WithDescription("Extract images from a PDF document as base64-encoded data. Returns up to 10 images per call."),
+		mcp.WithDescription("Extract embedded images from a document as base64-encoded data. Returns up to 10 images per call. Works with PDF files."),
 		mcp.WithString("filename",
 			mcp.Required(),
-			mcp.Description("The PDF filename to extract images from"),
+			mcp.Description("The document filename to extract images from"),
 		),
 		mcp.WithNumber("page",
 			mcp.Description("Optional page number to extract images from. If omitted, extracts from all pages."),
@@ -272,10 +279,10 @@ func registerExtractImages(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerReadURL(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("read_url",
-		mcp.WithDescription("Download a PDF from a URL and extract its text content. Max file size: 50MB."),
+		mcp.WithDescription("Download a document from a URL and extract its text content. Supports PDF and plain text URLs. Max file size: 50MB."),
 		mcp.WithString("url",
 			mcp.Required(),
-			mcp.Description("The URL of the PDF to download and read"),
+			mcp.Description("The URL of the document to download and read"),
 		),
 		mcp.WithString("pages",
 			mcp.Description("Optional page ranges to read, e.g. \"1-5\", \"10\", \"1-3,7,10-12\". If omitted, returns full text."),
@@ -301,7 +308,7 @@ func registerReadURL(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("ocr_document",
-		mcp.WithDescription("Force OCR text extraction on a PDF document, bypassing pdftotext. Useful for image-based/scanned PDFs or when pdftotext returns garbled text. Requires tesseract and pdftoppm."),
+		mcp.WithDescription("Force OCR text extraction on a document, bypassing normal text extraction. Useful for scanned PDFs or when normal extraction returns garbled text. Requires tesseract and pdftoppm."),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The PDF filename to OCR"),
@@ -361,7 +368,7 @@ func downloadAndReadPDF(reader *pdf.Reader, url, pagesStr string) (string, error
 	}
 
 	// Create temp file
-	tmpFile, err := os.CreateTemp("", "go-pdf-mcp-*.pdf")
+	tmpFile, err := os.CreateTemp("", "go-docs-mcp-*.pdf")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -385,4 +392,129 @@ func downloadAndReadPDF(reader *pdf.Reader, url, pagesStr string) (string, error
 		return reader.ReadFilePages(tmpFile.Name(), pagesStr)
 	}
 	return reader.ReadFile(tmpFile.Name())
+}
+
+func registerListFormats(s *server.MCPServer, reader *pdf.Reader) {
+	tool := mcp.NewTool("list_formats",
+		mcp.WithDescription("Show supported document formats and which dependencies are installed."),
+	)
+
+	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		formats := reader.ListFormats()
+
+		result := map[string]interface{}{
+			"formats": formats,
+		}
+
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling results: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(string(data)), nil
+	})
+}
+
+func registerReadImage(s *server.MCPServer, reader *pdf.Reader) {
+	tool := mcp.NewTool("read_image",
+		mcp.WithDescription("OCR a standalone image file (PNG, JPG, TIFF, BMP) using tesseract. Returns extracted text."),
+		mcp.WithString("filename",
+			mcp.Required(),
+			mcp.Description("The image filename to OCR (must be in the documents directory)"),
+		),
+		mcp.WithString("language",
+			mcp.Description("Tesseract language code (default: \"eng\"). Use \"spa\" for Spanish, \"fra\" for French, etc."),
+		),
+	)
+
+	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filename, err := request.RequireString("filename")
+		if err != nil {
+			return mcp.NewToolResultError("filename parameter is required"), nil
+		}
+
+		language := request.GetString("language", "eng")
+
+		text, err := reader.ReadImage(filename, language)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error reading image: %v", err)), nil
+		}
+
+		if strings.TrimSpace(text) == "" {
+			return mcp.NewToolResultText("[OCR completed but no text was detected in the image]"), nil
+		}
+
+		return mcp.NewToolResultText(text), nil
+	})
+}
+
+func registerGetDocumentOutline(s *server.MCPServer, reader *pdf.Reader) {
+	tool := mcp.NewTool("get_document_outline",
+		mcp.WithDescription("Extract heading structure from a document. For PDFs, detects numbered sections, ALL-CAPS headings, and short lines followed by blank lines. For Markdown/TXT, parses # headings."),
+		mcp.WithString("filename",
+			mcp.Required(),
+			mcp.Description("The document filename to extract outline from"),
+		),
+	)
+
+	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filename, err := request.RequireString("filename")
+		if err != nil {
+			return mcp.NewToolResultError("filename parameter is required"), nil
+		}
+
+		outline, err := reader.GetDocumentOutline(filename)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error extracting outline: %v", err)), nil
+		}
+
+		if len(outline) == 0 {
+			return mcp.NewToolResultText("[]"), nil
+		}
+
+		data, err := json.MarshalIndent(outline, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling outline: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(string(data)), nil
+	})
+}
+
+func registerExtractTables(s *server.MCPServer, reader *pdf.Reader) {
+	tool := mcp.NewTool("extract_tables",
+		mcp.WithDescription("Extract table-like structures from a document. Detects pipe-delimited, tab-delimited, and multi-space-delimited columns. For CSV files, parses the entire file as a table."),
+		mcp.WithString("filename",
+			mcp.Required(),
+			mcp.Description("The document filename to extract tables from"),
+		),
+		mcp.WithNumber("page",
+			mcp.Description("Optional page number for PDFs (1-based). If omitted, extracts from all pages."),
+		),
+	)
+
+	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filename, err := request.RequireString("filename")
+		if err != nil {
+			return mcp.NewToolResultError("filename parameter is required"), nil
+		}
+
+		page := request.GetInt("page", 0)
+
+		tables, err := reader.ExtractTables(filename, page)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error extracting tables: %v", err)), nil
+		}
+
+		if len(tables) == 0 {
+			return mcp.NewToolResultText("[]"), nil
+		}
+
+		data, err := json.MarshalIndent(tables, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling tables: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(string(data)), nil
+	})
 }

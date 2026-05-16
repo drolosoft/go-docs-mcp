@@ -1,4 +1,4 @@
-module github.com/juanatsap/go-pdf-mcp
+module github.com/drolosoft/go-docs-mcp
 
 go 1.25.5
 
