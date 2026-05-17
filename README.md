@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/icon.png" alt="go-docs-mcp" width="128" height="128">
+  <img src="assets/icon.png" alt="Go-Docs MCP" width="128" height="128">
 </p>
 
-<h1 align="center">go-docs-mcp</h1>
+<h1 align="center">Go-Docs MCP</h1>
 
 <p align="center">
   <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go&logoColor=white" alt="Go"></a>
@@ -12,7 +12,7 @@
 
 > **Install and Go.** One command, single binary. Your AI reads any document — PDF, text, Markdown, DOCX, images.
 
-Go MCP server for multi-format document access — read, search, extract images, OCR, and fetch documents from URLs via the [Model Context Protocol](https://modelcontextprotocol.io).
+MCP server for multi-format document access — read, search, extract images, OCR, and fetch documents from URLs via the [Model Context Protocol](https://modelcontextprotocol.io). 12 tools, 6 formats, zero configuration.
 
 ```bash
 go install github.com/drolosoft/go-docs-mcp@latest
@@ -23,49 +23,51 @@ For a deeper look at why an MCP server beats a direct tool, see **[Why MCP?](doc
 
 ---
 
-## 🏆 Why go-docs-mcp?
+## 🏆 Why Go-Docs MCP?
 
-| | Capability | go-docs-mcp | Node/TS | Python | Rust |
-|--|-----------|:---:|:---:|:---:|:---:|
-| ⚡ | Single binary, no runtime | ✅ | ❌ needs Node | ❌ needs Python | ✅ |
-| 📦 | `go install` one-liner | ✅ | ❌ npm+deps | ❌ pip+venv | ❌ cargo |
-| 📄 | Multi-format (6 types) | ✅ | ❌ one format | ❌ one format | ❌ one format |
-| 🔍 | Full-text search | ✅ | ⚠️ partial | ✅ | ✅ |
-| 👁️ | OCR (scanned PDFs) | ✅ | ❌ | ❌ | ⚠️ partial |
-| 🖼️ | Image extraction | ✅ | ⚠️ partial | ✅ | ❌ |
-| 📊 | Table extraction | ✅ | ⚠️ partial | ✅ | ✅ |
-| 📑 | Document outline | ✅ | ❌ | ❌ | ⚠️ partial |
-| 🌐 | Fetch from URL | ✅ | ⚠️ partial | ❌ | ❌ |
-| 🔒 | Dir-locked, read-only | ✅ | ⚠️ varies | ⚠️ varies | ✅ |
-| 💾 | Smart caching | ✅ | ❌ | ❌ | ❌ |
-| 🏠 | Fully offline | ✅ | ✅ | ✅ | ✅ |
+Every other document MCP server handles **one format** — a PDF server for PDFs, a DOCX server for DOCX. You'd need three separate servers to read three formats.
 
-Every other document MCP server handles **one format** — a PDF server for PDFs, a DOCX server for DOCX. You'd need three tools to read three formats. go-docs-mcp reads them all from a single binary.
+| | Go-Docs MCP | Others |
+|--|:---:|:---:|
+| Single binary, no runtime | **Yes** | Need Node/Python |
+| `go install` one-liner | **Yes** | npm+deps or pip+venv |
+| Multi-format (6 types) | **Yes** | One format each |
+| Full-text search | **Yes** | Partial or none |
+| OCR (scanned PDFs + images) | **Yes** | Rare |
+| Image & table extraction | **Yes** | Partial |
+| Document outline | **Yes** | Rare |
+| Fetch from URL | **Yes** | Rare |
+| Dir-locked, read-only | **Yes** | Varies |
+| Smart caching | **Yes** | No |
+| Fully offline | **Yes** | Yes |
+
+Go-Docs MCP reads them all from a single binary — fast, secure, and dependency-free at runtime.
 
 ---
 
-## 📋 Features — 12 Tools in 5 Categories
+## 📋 Features — 12 Tools
 
 | Category | Tool | Description |
 |----------|------|-------------|
-| **Discovery** | `list_documents` | List all available documents with metadata (filename, format, page count, size) |
-| **Discovery** | `list_formats` | List supported document formats and their dependencies |
-| **Reading** | `read_document` | Read full text, a specific page, or page ranges from any supported document |
-| **Reading** | `read_url` | Download a document from a URL and extract its text content |
-| **Reading** | `get_document_summary` | Get the first 3 pages of text as a quick overview |
-| **Search** | `search_document` | Case-insensitive full-text search with context and page hints |
-| **Analysis** | `get_document_metadata` | Get full document metadata (title, author, dates, version, etc.) |
-| **Analysis** | `get_document_outline` | Extract document outline / table of contents |
-| **Analysis** | `extract_tables` | Extract tables from documents as structured data |
-| **Analysis** | `extract_images` | Extract images from a document as base64-encoded data (max 10 per call) |
-| **OCR** | `ocr_document` | Force OCR on a PDF — for scanned/image-based documents or garbled text |
-| **OCR** | `read_image` | Extract text from an image file (PNG, JPG, TIFF) via OCR |
+| **Discovery** | `list_documents` | List all documents with metadata (format, pages, size) |
+| **Discovery** | `list_formats` | List supported formats and dependency status |
+| **Reading** | `read_document` | Full text, specific page, or page ranges from any format |
+| **Reading** | `read_url` | Download from URL and extract text (50MB max) |
+| **Reading** | `get_document_summary` | First 3 pages as a quick overview |
+| **Search** | `search_document` | Case-insensitive full-text search with context |
+| **Analysis** | `get_document_metadata` | Title, author, dates, version, page count |
+| **Analysis** | `get_document_outline` | Table of contents / bookmarks |
+| **Analysis** | `extract_tables` | Tables as structured data |
+| **Analysis** | `extract_images` | Images as base64 (max 10 per call) |
+| **OCR** | `ocr_document` | Force OCR on scanned/image-based PDFs |
+| **OCR** | `read_image` | Extract text from PNG, JPG, TIFF via OCR |
+
+**Highlights:**
 
 - **Fast** — mtime-based in-memory caching avoids redundant extraction
-- **Multi-format** — PDF, TXT, MD, CSV, DOCX, and images from a single server
-- **OCR** — automatic fallback to tesseract for image-based/scanned documents
-- **Secure** — directory-locked access with path traversal prevention
-- **Simple** — single binary, stdio transport, zero configuration required
+- **Multi-format** — PDF, TXT, MD, CSV, DOCX, and images from one server
+- **OCR** — automatic fallback to tesseract for scanned documents
+- **Secure** — directory-locked with path traversal prevention
 - **Portable** — works on macOS and Linux
 
 ---
@@ -76,36 +78,36 @@ Every other document MCP server handles **one format** — a PDF server for PDFs
 |--------|-------------|-------|
 | PDF | poppler (`pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`) | Full support — text, images, metadata, OCR fallback |
 | TXT, MD, CSV | None | Native, zero dependencies |
-| DOCX | pandoc or Go lib (optional) | Word document extraction |
-| Images (PNG, JPG, TIFF) | tesseract (optional) | OCR text extraction from image files |
+| DOCX | pandoc (optional) | Word document extraction |
+| Images (PNG, JPG, TIFF) | tesseract (optional) | OCR text extraction |
 
 ---
 
 ## 📦 Prerequisites
 
 - **Go 1.25+** ([install](https://go.dev/doc/install))
-- **poppler** (provides `pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`) — required for PDF support
-- **tesseract** _(optional, for OCR support — scanned PDFs and images)_
-- **pandoc** _(optional, for DOCX support)_
+- **poppler** — required for PDF support
+- **tesseract** _(optional)_ — enables OCR for scanned docs and images
+- **pandoc** _(optional)_ — enables DOCX support
 
 ```bash
 # macOS
 brew install poppler
-brew install tesseract        # optional: enables OCR for scanned docs + images
-brew install pandoc           # optional: enables DOCX support
+brew install tesseract        # optional: OCR
+brew install pandoc           # optional: DOCX
 
 # Debian/Ubuntu
 apt install poppler-utils
-apt install tesseract-ocr     # optional: enables OCR for scanned docs + images
-apt install pandoc            # optional: enables DOCX support
+apt install tesseract-ocr     # optional: OCR
+apt install pandoc            # optional: DOCX
 
 # Fedora/RHEL
 dnf install poppler-utils
-dnf install tesseract         # optional: enables OCR for scanned docs + images
-dnf install pandoc            # optional: enables DOCX support
+dnf install tesseract         # optional: OCR
+dnf install pandoc            # optional: DOCX
 ```
 
-> **Format note:** TXT, MD, and CSV work out of the box with zero dependencies. PDF requires poppler. DOCX requires pandoc. Images require tesseract. Install only what you need.
+> **Note:** TXT, MD, and CSV work out of the box with zero dependencies. Install only what you need.
 
 ---
 
@@ -130,14 +132,14 @@ make install    # installs to /usr/local/bin/
 
 ## ⚙️ Configuration
 
-The server reads documents from a configured directory. Set `DOCS_MCP_DIR` to change it:
+Go-Docs MCP reads documents from a configured directory. Set `DOCS_MCP_DIR` to change it:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DOCS_MCP_DIR` | `~/.docs-mcp/documents/` | Directory containing document files to serve |
-| `PDF_MCP_DIR` | _(backward compat alias)_ | Legacy alias — works the same as `DOCS_MCP_DIR` |
+| `DOCS_MCP_DIR` | `~/.docs-mcp/documents/` | Directory containing documents to serve |
+| `PDF_MCP_DIR` | _(legacy alias)_ | Backward-compatible alias for `DOCS_MCP_DIR` |
 
-Place your documents in the directory and the server will find them automatically. All supported formats (PDF, TXT, MD, CSV, DOCX, images) are detected.
+Place your documents in the directory and the server finds them automatically. All supported formats are detected.
 
 ---
 
@@ -162,7 +164,7 @@ Add to your `.claude/settings.json`:
 
 ### With Claude Desktop
 
-Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 
 ```json
 {
@@ -179,7 +181,7 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 
 ### With any MCP client
 
-The server communicates over **stdio** using JSON-RPC 2.0. Launch the binary and pipe JSON-RPC messages to stdin:
+The server communicates over **stdio** using JSON-RPC 2.0:
 
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | go-docs-mcp
@@ -226,7 +228,7 @@ Lists all supported document formats and their dependency status.
 
 ### `read_document`
 
-Reads the extracted text content of a document. For PDFs, automatically falls back to OCR if the document is image-based/scanned and `pdftotext` returns empty text.
+Reads the extracted text content of a document. Automatically falls back to OCR if the document is image-based/scanned and `pdftotext` returns empty text.
 
 **Parameters:**
 
@@ -384,7 +386,7 @@ Downloads a document from a URL and extracts its text content. Maximum file size
 
 ### `ocr_document`
 
-Forces OCR (Optical Character Recognition) on a PDF document using tesseract. Useful for scanned/image-based PDFs or when `pdftotext` returns garbled text. Requires `tesseract` and `pdftoppm` to be installed.
+Forces OCR on a PDF document using tesseract. Useful for scanned/image-based PDFs or when `pdftotext` returns garbled text. Requires `tesseract` and `pdftoppm`.
 
 > **Note:** `read_document` already auto-detects image-based PDFs and falls back to OCR. Use `ocr_document` when you want to force OCR regardless, or need to specify a non-English language.
 
@@ -393,8 +395,8 @@ Forces OCR (Optical Character Recognition) on a PDF document using tesseract. Us
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `filename` | string | Yes | The PDF filename to OCR |
-| `page` | number | No | Specific page to OCR (1-based). Omit to OCR all pages. |
-| `language` | string | No | Tesseract language code (default: `eng`). Use `spa` for Spanish, `fra` for French, etc. |
+| `page` | number | No | Specific page to OCR (1-based). Omit for all pages. |
+| `language` | string | No | Tesseract language code (default: `eng`). Use `spa`, `fra`, etc. |
 
 **Example input:**
 ```json
@@ -409,7 +411,7 @@ Forces OCR (Optical Character Recognition) on a PDF document using tesseract. Us
 
 ### `read_image`
 
-Extracts text from an image file using OCR. Supports PNG, JPG, and TIFF. Requires `tesseract` to be installed.
+Extracts text from an image file using OCR. Supports PNG, JPG, and TIFF. Requires `tesseract`.
 
 **Parameters:**
 
@@ -430,11 +432,11 @@ Extracts text from an image file using OCR. Supports PNG, JPG, and TIFF. Require
 
 ## 🔒 Security
 
-- **Directory-locked**: Only files within the configured `DOCS_MCP_DIR` are accessible
-- **Path traversal prevention**: Filenames are sanitized to their base component; `../` is rejected
-- **Extension filter**: Only supported document formats are served; requests for other file types are denied
-- **No write operations**: The server is strictly read-only
-- **URL downloads**: Limited to 50MB, Content-Type validated, temp files cleaned up immediately
+- **Directory-locked** — only files within `DOCS_MCP_DIR` are accessible
+- **Path traversal prevention** — filenames sanitized; `../` rejected
+- **Extension filter** — only supported formats served
+- **Read-only** — no write operations
+- **URL downloads** — 50MB limit, Content-Type validated, temp files cleaned immediately
 
 ---
 
