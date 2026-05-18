@@ -15,7 +15,7 @@
 
 > **Install and Go.** One command, single binary. Your AI reads any document — PDF, text, Markdown, DOCX, images.
 
-MCP server for multi-format document access — read, search, extract images, OCR, and fetch documents from URLs via the [Model Context Protocol](https://modelcontextprotocol.io). 12 tools, 6 formats, zero configuration.
+MCP server for multi-format document access — read, search, extract images, OCR, and fetch documents from URLs via the [Model Context Protocol](https://modelcontextprotocol.io). 13 tools, 6 formats, zero configuration.
 
 ```bash
 go install github.com/drolosoft/go-docs-mcp@latest
@@ -48,7 +48,7 @@ Go-Docs MCP reads them all from a single binary — fast, secure, and dependency
 
 ---
 
-## 📋 Features — 12 Tools
+## 📋 Features — 13 Tools
 
 | Category | Tool | Description |
 |----------|------|-------------|
@@ -64,6 +64,7 @@ Go-Docs MCP reads them all from a single binary — fast, secure, and dependency
 | **Analysis** | `extract_images` | Images as base64 (max 10 per call) |
 | **OCR** | `ocr_document` | Force OCR on scanned/image-based PDFs |
 | **OCR** | `read_image` | Extract text from PNG, JPG, TIFF via OCR |
+| **Export** | `convert_to_markdown` | Convert any document to clean Markdown |
 
 **Highlights:**
 
