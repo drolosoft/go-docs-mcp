@@ -71,7 +71,7 @@ func main() {
 	// Create MCP server
 	s := server.NewMCPServer(
 		"go-docs-mcp",
-		"4.0.0",
+		serverVersion(),
 		server.WithToolCapabilities(true),
 	)
 
@@ -119,16 +119,16 @@ func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("read_document",
-		mcp.WithDescription("Read text content from a document with optional page selection. Use this when you need the raw text of a PDF, TXT, MD, CSV, or DOCX file; supports page ranges (e.g. \"1-5\", \"1-3,7,10-12\") and auto-OCR fallback for scanned PDFs. Read-only."),
+		mcp.WithDescription("Read text content from a document with optional page selection. Use this when you need the raw text of a PDF, TXT, MD, CSV, or DOCX file; TXT/MD/CSV are returned verbatim, DOCX via pandoc; PDFs support page ranges (e.g. \"1-5\", \"1-3,7,10-12\") and auto-OCR fallback for scanned pages. Read-only."),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to read"),
 		),
 		mcp.WithNumber("page",
-			mcp.Description("Optional single page number to read (1-based). If omitted, returns full text."),
+			mcp.Description("Optional single page number to read (1-based, PDF only). If omitted, returns full text."),
 		),
 		mcp.WithString("pages",
-			mcp.Description("Optional page ranges to read, e.g. \"1-5\", \"10\", \"1-3,7,10-12\". Overrides 'page' if both provided."),
+			mcp.Description("Optional page ranges to read (PDF only), e.g. \"1-5\", \"10\", \"1-3,7,10-12\". Overrides 'page' if both provided."),
 		),
 	)
 

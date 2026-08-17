@@ -1,6 +1,9 @@
 package pdf
 
 import (
+	"time"
+	"os/exec"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,22 +216,113 @@ func TestListDocuments_SkipsSubdirectories(t *testing.T) {
 // 3. ReadDocument (text and markdown — no poppler needed)
 // ---------------------------------------------------------------------------
 
-func TestReadDocument_TextFile_FailsWithPdftotext(t *testing.T) {
+func TestReadDocument_TextFormats_ReturnContentVerbatim(t *testing.T) {
+	// The tool description promises "raw text of a PDF, TXT, MD, CSV, or DOCX
+	// file". Text formats must be read directly, never through pdftotext.
 	r, dir := newTestReader(t)
-
-	// ReadDocument routes ALL files through pdftotext (extractFull -> readWithOCRFallback -> runPdftotext).
-	// For non-PDF files (.txt, .md, .csv), pdftotext will fail because it only handles PDFs.
-	// This is expected behavior — the MCP wrappers in main.go validate format appropriateness.
-	content := "Line one\nLine two\nLine three"
-	writeFile(t, dir, "sample.txt", content)
-
-	_, err := r.ReadDocument("sample.txt", 0)
-	// pdftotext cannot read .txt files — expect an error
-	if err == nil {
-		t.Fatal("ReadDocument(.txt) expected error since pdftotext cannot read text files, got nil")
+	cases := map[string]string{
+		"sample.txt": "Line one\nLine two\nLine three",
+		"notes.md":   "# Title\n\nSome *markdown* body.",
+		"data.csv":   "a,b,c\n1,2,3",
 	}
-	if !strings.Contains(err.Error(), "pdftotext") {
-		t.Errorf("expected pdftotext-related error, got: %v", err)
+	for name, content := range cases {
+		writeFile(t, dir, name, content)
+		got, err := r.ReadDocument(name, 0)
+		if err != nil {
+			t.Fatalf("ReadDocument(%s): unexpected error: %v", name, err)
+		}
+		if got != content {
+			t.Errorf("ReadDocument(%s) = %q, want %q", name, got, content)
+		}
+	}
+}
+
+func TestReadDocument_TextFormats_ServeCache(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "notes.md", "v1")
+	if got, _ := r.ReadDocument("notes.md", 0); got != "v1" {
+		t.Fatalf("first read = %q", got)
+	}
+	// Same mtime -> cached; a rewrite with a newer mtime must be picked up.
+	time.Sleep(20 * time.Millisecond)
+	writeFile(t, dir, "notes.md", "v2")
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(filepath.Join(dir, "notes.md"), future, future)
+	if got, _ := r.ReadDocument("notes.md", 0); got != "v2" {
+		t.Errorf("after rewrite = %q, want v2 (cache must key on mtime)", got)
+	}
+}
+
+func TestReadDocument_TextFormats_RejectPageSelection(t *testing.T) {
+	// Pages are a PDF concept; asking for one on a text file must be a clear
+	// error, not a pdftotext failure and not silently the whole file.
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "notes.md", "# Title")
+	if _, err := r.ReadDocument("notes.md", 2); err == nil || !strings.Contains(err.Error(), "PDF") {
+		t.Errorf("ReadDocument(page=2) on .md: want a 'only supported for PDF' error, got %v", err)
+	}
+	if _, err := r.ReadDocumentPages("notes.md", "1-2"); err == nil || !strings.Contains(err.Error(), "PDF") {
+		t.Errorf("ReadDocumentPages on .md: want a 'only supported for PDF' error, got %v", err)
+	}
+}
+
+func TestSearchDocument_TextFile_FindsMatches(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "log.txt", "alpha\nbeta needle here\ngamma")
+	out, err := r.SearchDocument("log.txt", "needle")
+	if err != nil {
+		t.Fatalf("SearchDocument(.txt): %v", err)
+	}
+	if !strings.Contains(out, "needle") {
+		t.Errorf("search output should contain the matching line, got %q", out)
+	}
+}
+
+func TestGetDocumentSummary_TextFile_ReturnsHead(t *testing.T) {
+	r, dir := newTestReader(t)
+	var b strings.Builder
+	for i := 1; i <= 300; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	writeFile(t, dir, "big.md", b.String())
+	out, err := r.GetDocumentSummary("big.md")
+	if err != nil {
+		t.Fatalf("GetDocumentSummary(.md): %v", err)
+	}
+	if !strings.Contains(out, "line 1\n") || strings.Contains(out, "line 300") {
+		t.Errorf("summary should be the head of the file, not all of it: %q", out[:min(len(out), 200)])
+	}
+}
+
+func TestReadDocument_Docx_RequiresPandoc(t *testing.T) {
+	if _, err := exec.LookPath("pandoc"); err == nil {
+		t.Skip("pandoc installed; the error path is not reachable here")
+	}
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "doc.docx", "not really a docx")
+	_, err := r.ReadDocument("doc.docx", 0)
+	if err == nil || !strings.Contains(err.Error(), "pandoc") {
+		t.Errorf("ReadDocument(.docx) without pandoc: want an error naming pandoc, got %v", err)
+	}
+}
+
+func TestReadDocument_Docx_ViaPandoc(t *testing.T) {
+	if _, err := exec.LookPath("pandoc"); err != nil {
+		t.Skip("pandoc not installed")
+	}
+	r, dir := newTestReader(t)
+	// build a real docx with pandoc itself
+	src := filepath.Join(dir, "src.md")
+	_ = os.WriteFile(src, []byte("# Heading\n\nBody text from docx."), 0o644)
+	if out, err := exec.Command("pandoc", src, "-o", filepath.Join(dir, "doc.docx")).CombinedOutput(); err != nil {
+		t.Skipf("pandoc could not build fixture: %v %s", err, out)
+	}
+	got, err := r.ReadDocument("doc.docx", 0)
+	if err != nil {
+		t.Fatalf("ReadDocument(.docx): %v", err)
+	}
+	if !strings.Contains(got, "Body text from docx") {
+		t.Errorf("docx text not extracted: %q", got)
 	}
 }
 
