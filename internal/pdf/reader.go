@@ -145,6 +145,63 @@ var supportedExtensions = []string{".pdf", ".txt", ".md", ".csv", ".docx"}
 // imageExtensions lists supported image file extensions for OCR.
 var imageExtensions = []string{".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp"}
 
+// textExtensions are read directly from disk; they never go through pdftotext.
+var textExtensions = []string{".txt", ".md", ".csv"}
+
+// isTextFormat reports whether the (sanitized) filename is a plain-text format.
+func isTextFormat(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	for _, t := range textExtensions {
+		if ext == t {
+			return true
+		}
+	}
+	return false
+}
+
+// isPDF reports whether the (sanitized) filename is a PDF.
+func isPDF(filename string) bool {
+	return strings.ToLower(filepath.Ext(filename)) == ".pdf"
+}
+
+// summaryLines is how much of a text-format document GetDocumentSummary returns.
+const summaryLines = 100
+
+// readTextFile returns a text-format document verbatim.
+func readTextFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+	return string(data), nil
+}
+
+// readDocx converts a .docx to plain text with pandoc.
+func readDocx(path string) (string, error) {
+	if _, err := exec.LookPath("pandoc"); err != nil {
+		return "", fmt.Errorf("reading .docx requires pandoc (install pandoc and retry)")
+	}
+	out, err := exec.Command("pandoc", "-t", "plain", "--wrap=none", path).Output()
+	if err != nil {
+		return "", fmt.Errorf("pandoc failed: %w", err)
+	}
+	return string(out), nil
+}
+
+// extractText dispatches full-text extraction by format: text files verbatim,
+// .docx via pandoc, PDFs via pdftotext with OCR fallback.
+func (r *Reader) extractText(filename, path string) (string, error) {
+	switch {
+	case isTextFormat(filename):
+		return readTextFile(path)
+	case strings.ToLower(filepath.Ext(filename)) == ".docx":
+		return readDocx(path)
+	default:
+		text, _, err := r.readWithOCRFallback(path, 0, 0)
+		return text, err
+	}
+}
+
 // sanitizeFilename ensures the filename is safe (no directory traversal) and has a supported extension.
 func (r *Reader) sanitizeFilename(filename string) (string, error) {
 	base := filepath.Base(filename)
@@ -269,6 +326,9 @@ func (r *Reader) ReadDocument(filename string, page int) (string, error) {
 	}
 
 	if page > 0 {
+		if !isPDF(safe) {
+			return "", fmt.Errorf("page selection is only supported for PDF files; %s is %s — call without page/pages to read the whole document", safe, filepath.Ext(safe))
+		}
 		text, method, err := r.readWithOCRFallback(path, page, page)
 		if err != nil {
 			return "", err
@@ -293,6 +353,9 @@ func (r *Reader) ReadDocumentPages(filename, pagesStr string) (string, error) {
 		return "", fmt.Errorf("document not found: %s", safe)
 	}
 
+	if !isPDF(safe) {
+		return "", fmt.Errorf("page ranges are only supported for PDF files; %s is %s — call without page/pages to read the whole document", safe, filepath.Ext(safe))
+	}
 	return r.extractPageRanges(path, pagesStr)
 }
 
@@ -391,8 +454,8 @@ func (r *Reader) extractFull(filename, path string) (string, error) {
 	}
 	r.mu.RUnlock()
 
-	// Extract text with OCR fallback
-	text, _, err := r.readWithOCRFallback(path, 0, 0)
+	// Extract by format (text verbatim, docx via pandoc, PDF via pdftotext + OCR fallback)
+	text, err := r.extractText(filename, path)
 	if err != nil {
 		return "", err
 	}
@@ -683,6 +746,18 @@ func (r *Reader) GetDocumentSummary(filename string) (string, error) {
 	path := r.fullPath(safe)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return "", fmt.Errorf("document not found: %s", safe)
+	}
+
+	if !isPDF(safe) {
+		text, err := r.extractFull(safe, path)
+		if err != nil {
+			return "", err
+		}
+		lines := strings.SplitAfter(text, "\n")
+		if len(lines) > summaryLines {
+			lines = lines[:summaryLines]
+		}
+		return fmt.Sprintf("Summary (first %d lines) of %s:\n\n%s", len(lines), safe, strings.Join(lines, "")), nil
 	}
 
 	text, err := r.extractPage(path, 1, 3)
