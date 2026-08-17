@@ -71,7 +71,7 @@ func main() {
 	// Create MCP server
 	s := server.NewMCPServer(
 		"go-docs-mcp",
-		"4.0.0",
+		serverVersion(),
 		server.WithToolCapabilities(true),
 	)
 
