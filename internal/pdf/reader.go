@@ -1677,6 +1677,10 @@ func preparePicture(prefix string, picture listedImage) (ImageInfo, error) {
 			scaled = boxResample(decoded, width, height)
 		}
 
+		// DefaultCompression on purpose: png.BestSpeed encodes a 1600 px
+		// photo about a fifth faster, but next to pdfimages and the file
+		// I/O the whole call did not get measurably faster, and the PNG
+		// grew by 4 %.
 		var encoded bytes.Buffer
 		if err := png.Encode(&encoded, scaled); err != nil {
 			return ImageInfo{}, fmt.Errorf("failed to encode PNG: %w", err)
