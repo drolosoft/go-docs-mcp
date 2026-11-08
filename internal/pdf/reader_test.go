@@ -1834,3 +1834,63 @@ func TestReadDocument_Docx_FindsHomebrewPandocWithoutPATH(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 26. Errors name files, not where they live
+// ---------------------------------------------------------------------------
+
+// assertNoAbsolutePath fails when an error message shows the directory.
+func assertNoAbsolutePath(t *testing.T, what string, err error, dir string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s: want an error, got nil", what)
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Errorf("%s leaks the path %s: %q", what, dir, err)
+	}
+}
+
+func TestErrors_DoNotLeakAbsolutePaths(t *testing.T) {
+	r, dir := newTestReader(t)
+
+	// A file the server cannot open fails on read, after it was found.
+	writeFile(t, dir, "locked.md", "# Locked")
+	if err := os.Chmod(filepath.Join(dir, "locked.md"), 0); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() {
+		os.Chmod(filepath.Join(dir, "locked.md"), 0o644)
+	})
+
+	_, err := r.ReadDocument(t.Context(), "locked.md", 0)
+	assertNoAbsolutePath(t, "ReadDocument(unreadable)", err, dir)
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("the cause should stay in the message: %q", err)
+	}
+
+	_, err = r.GetDocumentOutline(t.Context(), "locked.md")
+	assertNoAbsolutePath(t, "GetDocumentOutline(unreadable)", err, dir)
+
+	_, err = r.ExtractTables(t.Context(), "locked.md", 0)
+	assertNoAbsolutePath(t, "ExtractTables(unreadable)", err, dir)
+
+	_, err = r.ConvertToMarkdown(t.Context(), "locked.md")
+	assertNoAbsolutePath(t, "ConvertToMarkdown(unreadable)", err, dir)
+
+	// A documents directory that is gone.
+	missing := filepath.Join(dir, "missing-dir")
+	gone := NewReader(missing)
+
+	_, err = gone.ListDocuments(t.Context())
+	assertNoAbsolutePath(t, "ListDocuments(missing dir)", err, missing)
+
+	_, err = gone.ReadDocument(t.Context(), "any.txt", 0)
+	assertNoAbsolutePath(t, "ReadDocument(missing dir)", err, missing)
+
+	// A downloaded file that is not there.
+	_, err = r.ReadFile(t.Context(), filepath.Join(dir, "download.pdf"))
+	assertNoAbsolutePath(t, "ReadFile(missing)", err, dir)
+
+	_, err = r.ReadFilePages(t.Context(), filepath.Join(dir, "download.pdf"), "1")
+	assertNoAbsolutePath(t, "ReadFilePages(missing)", err, dir)
+}

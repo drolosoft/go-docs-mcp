@@ -265,7 +265,7 @@ const summaryLines = 100
 func readTextFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("failed to read file: %w", err)
+		return "", fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 	return string(data), nil
 }
@@ -336,6 +336,18 @@ func (r *Reader) fullPath(filename string) string {
 	return filepath.Join(r.docsDir, filename)
 }
 
+// withoutPath drops the absolute path that an os error carries and keeps the
+// operation and the cause, "open: permission denied" for instance, so a tool
+// result names the file but never shows where the documents live on disk.
+// errors.Is still sees the cause.
+func withoutPath(err error) error {
+	var pathError *fs.PathError
+	if errors.As(err, &pathError) {
+		return fmt.Errorf("%s: %w", pathError.Op, pathError.Err)
+	}
+	return err
+}
+
 // errOutsideDocsDir is returned when a name inside the documents directory
 // resolves, through a symlink, to a file that lives somewhere else.
 var errOutsideDocsDir = errors.New("resolves outside the documents directory")
@@ -348,7 +360,7 @@ var errOutsideDocsDir = errors.New("resolves outside the documents directory")
 func (r *Reader) resolveDocument(safe string) (string, error) {
 	realDir, err := filepath.EvalSymlinks(r.docsDir)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve the documents directory: %w", err)
+		return "", fmt.Errorf("cannot resolve the documents directory: %w", withoutPath(err))
 	}
 
 	realPath, err := filepath.EvalSymlinks(r.fullPath(safe))
@@ -356,7 +368,7 @@ func (r *Reader) resolveDocument(safe string) (string, error) {
 		return "", fmt.Errorf("document not found: %s", safe)
 	}
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve %s: %w", safe, err)
+		return "", fmt.Errorf("cannot resolve %s: %w", safe, withoutPath(err))
 	}
 
 	// Rel answers ".." or a "../" prefix exactly when the real path is not
@@ -374,7 +386,7 @@ func (r *Reader) resolveDocument(safe string) (string, error) {
 func (r *Reader) ListDocuments(ctx context.Context) ([]DocumentInfo, error) {
 	entries, err := os.ReadDir(r.docsDir)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read documents directory %s: %w", r.docsDir, err)
+		return nil, fmt.Errorf("cannot read the documents directory: %w", withoutPath(err))
 	}
 
 	var docs []DocumentInfo
@@ -503,7 +515,7 @@ func (r *Reader) ReadDocumentPages(ctx context.Context, filename, pagesStr strin
 // Automatically falls back to OCR if pdftotext returns empty text.
 func (r *Reader) ReadFile(ctx context.Context, path string) (string, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("file not found: %s", path)
+		return "", fmt.Errorf("file not found: %s", filepath.Base(path))
 	}
 	text, _, err := r.readWithOCRFallback(ctx, path, 0, 0)
 	return text, err
@@ -512,7 +524,7 @@ func (r *Reader) ReadFile(ctx context.Context, path string) (string, error) {
 // ReadFilePages extracts text from specific page ranges of an arbitrary PDF file path.
 func (r *Reader) ReadFilePages(ctx context.Context, path, pagesStr string) (string, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("file not found: %s", path)
+		return "", fmt.Errorf("file not found: %s", filepath.Base(path))
 	}
 	return r.extractPageRanges(ctx, path, pagesStr)
 }
@@ -640,7 +652,7 @@ func (r *Reader) readPageRanges(ctx context.Context, path string, ranges [][2]in
 func (r *Reader) extractFull(ctx context.Context, filename, path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Errorf("cannot stat file: %w", err)
+		return "", fmt.Errorf("cannot stat file: %w", withoutPath(err))
 	}
 	mtime := info.ModTime()
 
@@ -744,7 +756,7 @@ func (r *Reader) ocrPage(ctx context.Context, path string, page int, language st
 	// Create temp dir for the TIFF file
 	tmpDir, err := os.MkdirTemp("", "go-docs-mcp-ocr-")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp dir: %w", err)
+		return "", fmt.Errorf("failed to create temp dir: %w", withoutPath(err))
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -766,7 +778,7 @@ func (r *Reader) ocrPage(ctx context.Context, path string, page int, language st
 	// where tesseract cannot open files directly on some macOS installations
 	tiffData, err := os.Open(tiffPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to open TIFF file: %w", err)
+		return "", fmt.Errorf("failed to open TIFF file: %w", withoutPath(err))
 	}
 	defer tiffData.Close()
 
@@ -1019,7 +1031,7 @@ func (r *Reader) GetDocumentMetadata(ctx context.Context, filename string) (*Doc
 
 	fi, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("cannot stat file: %w", err)
+		return nil, fmt.Errorf("cannot stat file: %w", withoutPath(err))
 	}
 
 	out, err := runTool(ctx, toolTimeout, nil, path, r.pdfinfoBin, path)
@@ -1085,7 +1097,7 @@ func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page in
 	// Create temp directory for extracted images
 	tmpDir, err := os.MkdirTemp("", "go-docs-mcp-images-")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temp dir: %w", err)
+		return nil, fmt.Errorf("failed to create temp dir: %w", withoutPath(err))
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -1141,7 +1153,7 @@ func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page in
 	// Read extracted image files
 	entries, err := os.ReadDir(tmpDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read temp dir: %w", err)
+		return nil, fmt.Errorf("failed to read temp dir: %w", withoutPath(err))
 	}
 
 	var images []ImageInfo
@@ -1248,7 +1260,7 @@ func (r *Reader) ReadImage(ctx context.Context, filename string, language string
 	// Open image and pipe to tesseract via stdin
 	imgData, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("failed to open image file: %w", err)
+		return "", fmt.Errorf("failed to open image file: %w", withoutPath(err))
 	}
 	defer imgData.Close()
 
@@ -1294,7 +1306,7 @@ func (r *Reader) GetDocumentOutline(ctx context.Context, filename string) ([]Out
 func (r *Reader) outlineMarkdown(path string) ([]OutlineEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 
 	var entries []OutlineEntry
@@ -1483,7 +1495,7 @@ func (r *Reader) ExtractTables(ctx context.Context, filename string, page int) (
 func (r *Reader) tablesCSV(path string) ([]TableData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
@@ -1531,7 +1543,7 @@ func splitCSVLine(line string) []string {
 func (r *Reader) tablesMarkdown(path string) ([]TableData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -1609,7 +1621,7 @@ func (r *Reader) tablesPDF(ctx context.Context, path string, page int) ([]TableD
 func (r *Reader) tablesPlaintext(path string) ([]TableData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 
 	return r.detectTablesFromLayout(string(data), 0), nil
@@ -1725,21 +1737,21 @@ func (r *Reader) ConvertToMarkdown(ctx context.Context, filename string) (string
 	case ".md":
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("failed to read file: %w", err)
+			return "", fmt.Errorf("failed to read file: %w", withoutPath(err))
 		}
 		return string(data), nil
 
 	case ".txt":
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("failed to read file: %w", err)
+			return "", fmt.Errorf("failed to read file: %w", withoutPath(err))
 		}
 		return fmt.Sprintf("```text\n%s\n```", string(data)), nil
 
 	case ".csv":
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("failed to read file: %w", err)
+			return "", fmt.Errorf("failed to read file: %w", withoutPath(err))
 		}
 		return fmt.Sprintf("```csv\n%s\n```", string(data)), nil
 
