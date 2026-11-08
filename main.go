@@ -119,13 +119,21 @@ func main() {
 // options are appended to the server's own, which lets a test switch on
 // checks such as output schema validation.
 func newServer(reader *pdf.Reader, docsDir string, extra ...server.ServerOption) *server.MCPServer {
+	// The hooks are filled in after the server exists, because the one that
+	// refreshes resources/list needs the server itself.
+	hooks := &server.Hooks{}
+
 	options := []server.ServerOption{
 		server.WithToolCapabilities(true),
 		server.WithToolHandlerMiddleware(redactPathsMiddleware(docsDir, os.TempDir())),
+		server.WithResourceCapabilities(false, false),
+		server.WithHooks(hooks),
 	}
 	options = append(options, extra...)
 
 	s := server.NewMCPServer("go-docs-mcp", serverVersion(), options...)
+
+	registerDocumentResources(s, hooks, reader, docsDir)
 
 	// Register tools (13 total, 12 when read_url is disabled)
 	registerListDocuments(s, reader)

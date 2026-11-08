@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -694,4 +695,158 @@ func onePagePDF(title, text string) []byte {
 	fmt.Fprintf(&document, "trailer\n<< /Size %d /Root 1 0 R /Info 6 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, crossReference)
 
 	return document.Bytes()
+}
+
+// listedResource is the part of a resources/list entry these tests look at.
+type listedResource struct {
+	URI      string `json:"uri"`
+	Name     string `json:"name"`
+	MIMEType string `json:"mimeType"`
+}
+
+// listResources calls resources/list and decodes the resources it returns.
+func listResources(t *testing.T, mcpServer *server.MCPServer) []listedResource {
+	t.Helper()
+
+	data := handle(t, mcpServer, `{"jsonrpc":"2.0","id":4,"method":"resources/list"}`)
+
+	var envelope struct {
+		Result struct {
+			Resources []listedResource `json:"resources"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode resources/list: %v\n%s", err, data)
+	}
+
+	return envelope.Result.Resources
+}
+
+// readResource calls resources/read on uri and returns the raw response, so
+// a test can look at the contents or at the error.
+func readResource(t *testing.T, mcpServer *server.MCPServer, uri string) []byte {
+	t.Helper()
+
+	request, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      5,
+		"method":  "resources/read",
+		"params":  map[string]any{"uri": uri},
+	})
+	if err != nil {
+		t.Fatalf("marshal resources/read: %v", err)
+	}
+
+	return handle(t, mcpServer, string(request))
+}
+
+// readResourceText reads uri and returns the text and MIME type of its only
+// content, failing the test when the read does not succeed.
+func readResourceText(t *testing.T, mcpServer *server.MCPServer, uri string) (string, string) {
+	t.Helper()
+
+	data := readResource(t, mcpServer, uri)
+
+	var envelope struct {
+		Result struct {
+			Contents []struct {
+				URI      string `json:"uri"`
+				MIMEType string `json:"mimeType"`
+				Text     string `json:"text"`
+			} `json:"contents"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode resources/read: %v\n%s", err, data)
+	}
+	if len(envelope.Result.Contents) != 1 {
+		t.Fatalf("resources/read %s: want one content, got %s", uri, data)
+	}
+
+	content := envelope.Result.Contents[0]
+	if content.URI != uri {
+		t.Errorf("content uri = %q, want %q", content.URI, uri)
+	}
+
+	return content.Text, content.MIMEType
+}
+
+func TestResourcesListEnumeratesDocuments(t *testing.T) {
+	mcpServer, docsDir := newStructuredServer(t)
+
+	resources := listResources(t, mcpServer)
+
+	want := []listedResource{
+		{URI: "docs://data.csv", Name: "data.csv", MIMEType: "text/csv"},
+		{URI: "docs://notes.md", Name: "notes.md", MIMEType: "text/markdown"},
+	}
+	if !slices.Equal(resources, want) {
+		t.Fatalf("resources/list =\n  %+v\nwant\n  %+v", resources, want)
+	}
+
+	// The list is read from the directory on every call, so a document
+	// dropped in after the server started can be mentioned right away.
+	writeTestFile(t, docsDir, "my report.txt", "added later\n")
+
+	resources = listResources(t, mcpServer)
+
+	added := listedResource{URI: "docs://my%20report.txt", Name: "my report.txt", MIMEType: "text/plain"}
+	if !slices.Contains(resources, added) {
+		t.Fatalf("resources/list after adding a file = %+v, want it to contain %+v", resources, added)
+	}
+}
+
+func TestResourceTemplateIsAdvertised(t *testing.T) {
+	mcpServer, _ := newTestServer(t)
+
+	data := handle(t, mcpServer, `{"jsonrpc":"2.0","id":6,"method":"resources/templates/list"}`)
+
+	if !strings.Contains(string(data), `"uriTemplate":"docs://{filename}"`) {
+		t.Fatalf("resources/templates/list has no docs://{filename}: %s", data)
+	}
+}
+
+func TestReadResourceReturnsDocumentText(t *testing.T) {
+	mcpServer, docsDir := newStructuredServer(t)
+	writeTestFile(t, docsDir, "my report.txt", "spaces in the name\n")
+
+	text, mimeType := readResourceText(t, mcpServer, "docs://notes.md")
+	if text != "# Notes\n\n## First part\n\nSome text.\n" || mimeType != "text/markdown" {
+		t.Errorf("docs://notes.md = %q (%s)", text, mimeType)
+	}
+
+	text, mimeType = readResourceText(t, mcpServer, "docs://my%20report.txt")
+	if text != "spaces in the name\n" || mimeType != "text/plain" {
+		t.Errorf("docs://my%%20report.txt = %q (%s)", text, mimeType)
+	}
+}
+
+func TestReadResourceOutsideTheDirectoryFails(t *testing.T) {
+	parentDir := t.TempDir()
+	docsDir := filepath.Join(parentDir, "documents")
+	if err := os.Mkdir(docsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeTestFile(t, parentDir, "secret.txt", "outside the documents directory\n")
+
+	mcpServer := newServer(pdf.NewReader(docsDir), docsDir)
+
+	for _, uri := range []string{
+		"docs://../secret.txt",
+		"docs://..%2Fsecret.txt",
+		"docs://" + url.PathEscape(filepath.Join(parentDir, "secret.txt")),
+		"docs://missing.txt",
+	} {
+		data := readResource(t, mcpServer, uri)
+
+		if !strings.Contains(string(data), `"error"`) {
+			t.Errorf("%s was read: %s", uri, data)
+		}
+		if strings.Contains(string(data), "outside the documents directory") {
+			t.Errorf("%s leaked the file: %s", uri, data)
+		}
+		if strings.Contains(string(data), parentDir) {
+			t.Errorf("%s error reveals the disk path: %s", uri, data)
+		}
+	}
 }
