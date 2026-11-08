@@ -1,13 +1,13 @@
 package pdf
 
 import (
-	"time"
-	"os/exec"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestReader creates a Reader pointing at a temp directory with test files.
@@ -993,14 +993,14 @@ func TestIsTextEmpty(t *testing.T) {
 		pageCount int
 		expected  bool
 	}{
-		{"", 1, true},                       // empty
-		{"   \n\t\r  ", 1, true},            // whitespace only
-		{"hello world", 1, true},            // 10 chars < 50 threshold
-		{strings.Repeat("x", 50), 1, false}, // exactly 50 non-ws chars
-		{strings.Repeat("x", 49), 1, true},  // 49 < 50
+		{"", 1, true},                        // empty
+		{"   \n\t\r  ", 1, true},             // whitespace only
+		{"hello world", 1, true},             // 10 chars < 50 threshold
+		{strings.Repeat("x", 50), 1, false},  // exactly 50 non-ws chars
+		{strings.Repeat("x", 49), 1, true},   // 49 < 50
 		{strings.Repeat("x", 100), 2, false}, // 100 >= 100 (50*2)
 		{strings.Repeat("x", 99), 2, true},   // 99 < 100
-		{"abc", 0, true},                      // pageCount 0 treated as 1
+		{"abc", 0, true},                     // pageCount 0 treated as 1
 	}
 
 	for i, tc := range tests {
@@ -1029,8 +1029,8 @@ func TestMatchNumberedHeading(t *testing.T) {
 		{"1.1.1 Details", 3},
 		{"2.3.4.5 Deep heading", 4},
 		{"Regular text line here", 0},
-		{"Hello", 0},   // single word, no number prefix
-		{"1.", 0},       // only number, no text after
+		{"Hello", 0}, // single word, no number prefix
+		{"1.", 0},    // only number, no text after
 	}
 
 	for _, tc := range tests {

@@ -53,13 +53,13 @@ type cacheEntry struct {
 // Reader handles PDF text extraction via pdftotext with in-memory caching.
 // Supports automatic OCR fallback for image-based PDFs using tesseract.
 type Reader struct {
-	docsDir       string
-	pdftotextBin  string
-	pdfinfoBin    string
-	pdfimagesBin  string
-	pdftoppmBin   string
-	tesseractBin  string
-	hasOCR        bool // true if both pdftoppm and tesseract are available
+	docsDir      string
+	pdftotextBin string
+	pdfinfoBin   string
+	pdfimagesBin string
+	pdftoppmBin  string
+	tesseractBin string
+	hasOCR       bool // true if both pdftoppm and tesseract are available
 
 	mu    sync.RWMutex
 	cache map[string]*cacheEntry
