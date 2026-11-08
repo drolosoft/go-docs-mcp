@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/drolosoft/go-docs-mcp/internal/pdf"
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
@@ -882,5 +883,171 @@ func TestInitializeCarriesInstructions(t *testing.T) {
 			t.Fatalf("instructions do not name %s in order: %q", name, instructions)
 		}
 		previous = position
+	}
+}
+
+// recordingSession is a client session that keeps the notifications the
+// server sends it, so a test can read the progress of a tool call.
+type recordingSession struct {
+	notifications chan mcp.JSONRPCNotification
+}
+
+// newRecordingSession returns a session with room for more notifications
+// than one call sends, so the server never finds the channel full.
+func newRecordingSession() *recordingSession {
+	return &recordingSession{notifications: make(chan mcp.JSONRPCNotification, 16)}
+}
+
+// Initialize does nothing: the session is ready from the start.
+func (session *recordingSession) Initialize() {}
+
+// Initialized reports true, because the server only notifies initialized
+// sessions.
+func (session *recordingSession) Initialized() bool {
+	return true
+}
+
+// NotificationChannel is where the server writes the notifications.
+func (session *recordingSession) NotificationChannel() chan<- mcp.JSONRPCNotification {
+	return session.notifications
+}
+
+// SessionID names the session.
+func (session *recordingSession) SessionID() string {
+	return "recording-session"
+}
+
+// progressUpdate is the part of a notifications/progress these tests check.
+type progressUpdate struct {
+	Token    any
+	Progress float64
+	Total    float64
+	Message  string
+}
+
+// receivedProgress drains the progress notifications the session got.
+func (session *recordingSession) receivedProgress(t *testing.T) []progressUpdate {
+	t.Helper()
+
+	var updates []progressUpdate
+	for {
+		select {
+		case notification := <-session.notifications:
+			if notification.Method != string(mcp.MethodNotificationProgress) {
+				t.Errorf("unexpected notification %s", notification.Method)
+				continue
+			}
+
+			fields := notification.Params.AdditionalFields
+			update := progressUpdate{Token: fields["progressToken"]}
+			update.Progress, _ = fields["progress"].(float64)
+			update.Total, _ = fields["total"].(float64)
+			update.Message, _ = fields["message"].(string)
+			updates = append(updates, update)
+		default:
+			return updates
+		}
+	}
+}
+
+func TestProgressNotifierSendsToTheCaller(t *testing.T) {
+	mcpServer, _ := newTestServer(t)
+	session := newRecordingSession()
+	ctx := mcpServer.WithContext(context.Background(), session)
+
+	notifier := progressNotifier{server: mcpServer, token: "ocr-1"}
+	notifier.notify(ctx, 0, 3, "starting OCR of 3 pages")
+	notifier.notify(ctx, 3, 0, "OCR done")
+
+	// A total of 0 means unknown, and the notification leaves it out.
+	want := []progressUpdate{
+		{Token: "ocr-1", Progress: 0, Total: 3, Message: "starting OCR of 3 pages"},
+		{Token: "ocr-1", Progress: 3, Total: 0, Message: "OCR done"},
+	}
+	if got := session.receivedProgress(t); !slices.Equal(got, want) {
+		t.Fatalf("progress = %+v, want %+v", got, want)
+	}
+}
+
+func TestProgressNotifierNeedsATokenAndAServer(t *testing.T) {
+	mcpServer, _ := newTestServer(t)
+	session := newRecordingSession()
+	ctx := mcpServer.WithContext(context.Background(), session)
+
+	// A request without _meta.progressToken asked for no progress, and a
+	// context without a server has nobody to send it through.
+	withoutToken := newProgressNotifier(ctx, mcp.CallToolRequest{})
+	withoutToken.notify(ctx, 0, 1, "starting OCR of 1 page")
+
+	request := mcp.CallToolRequest{}
+	request.Params.Meta = &mcp.Meta{ProgressToken: "ocr-2"}
+	withoutServer := newProgressNotifier(context.Background(), request)
+	withoutServer.notify(ctx, 0, 1, "starting OCR of 1 page")
+
+	if got := session.receivedProgress(t); len(got) != 0 {
+		t.Fatalf("progress = %+v, want none", got)
+	}
+}
+
+// callOCRWithSession runs ocr_document on filename through HandleMessage,
+// as the stdio transport does, with session as the caller. A non-nil token
+// is sent as _meta.progressToken.
+func callOCRWithSession(t *testing.T, mcpServer *server.MCPServer, session *recordingSession, filename string, token any) string {
+	t.Helper()
+
+	params := map[string]any{
+		"name":      "ocr_document",
+		"arguments": map[string]any{"filename": filename},
+	}
+	if token != nil {
+		params["_meta"] = map[string]any{"progressToken": token}
+	}
+
+	message, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": params})
+	if err != nil {
+		t.Fatalf("marshal tools/call: %v", err)
+	}
+
+	ctx := mcpServer.WithContext(context.Background(), session)
+
+	response, err := json.Marshal(mcpServer.HandleMessage(ctx, message))
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+
+	return string(response)
+}
+
+func TestOCRDocumentReportsProgress(t *testing.T) {
+	docsDir := t.TempDir()
+	reader := pdf.NewReader(docsDir)
+	if !reader.HasOCR() || reader.CheckDependencies() != nil {
+		t.Skip("OCR needs tesseract and poppler")
+	}
+	writeTestFile(t, docsDir, "scan.pdf", string(onePagePDF("Scan", "HELLO WORLD")))
+
+	mcpServer := newServer(reader, docsDir)
+	session := newRecordingSession()
+
+	response := callOCRWithSession(t, mcpServer, session, "scan.pdf", "ocr-3")
+	if !strings.Contains(response, "HELLO") {
+		t.Fatalf("ocr_document did not read the page: %s", response)
+	}
+
+	want := []progressUpdate{
+		{Token: "ocr-3", Progress: 0, Total: 1, Message: "starting OCR of 1 page"},
+		{Token: "ocr-3", Progress: 1, Total: 1, Message: "OCR done"},
+	}
+	if got := session.receivedProgress(t); !slices.Equal(got, want) {
+		t.Fatalf("progress = %+v, want %+v", got, want)
+	}
+
+	// The same call without a token asks for no progress and gets none.
+	response = callOCRWithSession(t, mcpServer, session, "scan.pdf", nil)
+	if !strings.Contains(response, "HELLO") {
+		t.Fatalf("ocr_document without a token did not read the page: %s", response)
+	}
+	if got := session.receivedProgress(t); len(got) != 0 {
+		t.Fatalf("progress without a token = %+v, want none", got)
 	}
 }

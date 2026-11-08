@@ -528,6 +528,85 @@ func registerReadURL(s *server.MCPServer, reader *pdf.Reader, fetcher *urlFetche
 	})
 }
 
+// progressNotifier sends notifications/progress for one tool call to the
+// client that made it. It is silent when the call carried no progress token,
+// since the client then asked for none.
+type progressNotifier struct {
+	server *server.MCPServer
+	token  mcp.ProgressToken
+}
+
+// newProgressNotifier reads the progress token of request and the server
+// that is handling it from ctx.
+func newProgressNotifier(ctx context.Context, request mcp.CallToolRequest) progressNotifier {
+	notifier := progressNotifier{server: server.ServerFromContext(ctx)}
+
+	if request.Params.Meta != nil {
+		notifier.token = request.Params.Meta.ProgressToken
+	}
+
+	return notifier
+}
+
+// enabled reports whether notify would send anything, so a caller can skip
+// work that only feeds the messages.
+func (notifier progressNotifier) enabled() bool {
+	return notifier.server != nil && notifier.token != nil
+}
+
+// notify reports progress out of total, which is left out when it is 0
+// because the spec reads a missing total as unknown. A notification that
+// cannot be delivered is dropped: progress is a courtesy and must never fail
+// the call it describes.
+func (notifier progressNotifier) notify(ctx context.Context, progress, total float64, message string) {
+	if !notifier.enabled() {
+		return
+	}
+
+	params := map[string]any{
+		"progressToken": notifier.token,
+		"progress":      progress,
+		"message":       message,
+	}
+	if total > 0 {
+		params["total"] = total
+	}
+
+	_ = notifier.server.SendNotificationToClient(ctx, string(mcp.MethodNotificationProgress), params)
+}
+
+// ocrPageCount returns how many pages an ocr_document call will read: one
+// when it names a page, otherwise the page count pdfinfo reports, or 0 when
+// that is unknown.
+func ocrPageCount(ctx context.Context, reader *pdf.Reader, filename string, page int) int {
+	if page > 0 {
+		return 1
+	}
+
+	metadata, err := reader.GetDocumentMetadata(ctx, filename)
+	if err != nil {
+		return 0
+	}
+
+	return metadata.Pages
+}
+
+// ocrStartMessage is the first progress message of an OCR call.
+func ocrStartMessage(pages int) string {
+	switch pages {
+	case 0:
+		return "starting OCR"
+	case 1:
+		return "starting OCR of 1 page"
+	default:
+		return fmt.Sprintf("starting OCR of %d pages", pages)
+	}
+}
+
+// registerOCRDocument adds ocr_document, which reads a PDF through
+// tesseract. The reader OCRs page by page inside one call and has no hook
+// per page, so a client that asks for progress gets two notifications: the
+// page count before the work and "OCR done" after it.
 func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("ocr_document",
 		mcp.WithDescription("Force OCR text extraction on a PDF, bypassing normal text extraction. Use this when read_document returns garbled or empty text from a scanned PDF; requires tesseract and pdftoppm. Read-only."),
@@ -560,10 +639,21 @@ func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 		// call brings no language, so the default here must stay empty.
 		language := request.GetString("language", "")
 
+		// The page count costs a pdfinfo run, so it is only asked for when
+		// the client wants to hear about progress.
+		progress := newProgressNotifier(ctx, request)
+		pages := 0
+		if progress.enabled() {
+			pages = ocrPageCount(ctx, reader, filename, page)
+		}
+		progress.notify(ctx, 0, float64(pages), ocrStartMessage(pages))
+
 		text, err := reader.OCRDocument(ctx, filename, page, language)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("OCR error: %v", err)), nil
 		}
+
+		progress.notify(ctx, float64(max(pages, 1)), float64(pages), "OCR done")
 
 		if strings.TrimSpace(text) == "" {
 			return mcp.NewToolResultText("[OCR completed but no text was detected on the page(s)]"), nil
