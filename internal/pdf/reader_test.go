@@ -297,10 +297,10 @@ func TestGetDocumentSummary_TextFile_ReturnsHead(t *testing.T) {
 }
 
 func TestReadDocument_Docx_RequiresPandoc(t *testing.T) {
-	if _, err := exec.LookPath("pandoc"); err == nil {
-		t.Skip("pandoc installed; the error path is not reachable here")
-	}
 	r, dir := newTestReader(t)
+
+	// A pandoc that is not there, whatever this machine has installed.
+	r.pandocBin = filepath.Join(dir, "no-such-pandoc")
 	writeFile(t, dir, "doc.docx", "not really a docx")
 	_, err := r.ReadDocument(t.Context(), "doc.docx", 0)
 	if err == nil || !strings.Contains(err.Error(), "pandoc") {
@@ -1782,5 +1782,55 @@ func TestOCR_FallbackUsesEnvironmentLanguage(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "tesseract stdin stdout -l spa") {
 		t.Errorf("the OCR fallback should use DOCS_MCP_OCR_LANG=spa, tesseract ran as:\n%s", data)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 25. Where the binaries are looked for
+// ---------------------------------------------------------------------------
+
+func TestFindBinary_TriesTheHomebrewDirsBeforePATH(t *testing.T) {
+	empty := t.TempDir()
+	withPandoc := t.TempDir()
+	fake := writeFakeBinary(t, withPandoc, "pandoc", "")
+
+	if got := findBinary("pandoc", []string{empty, withPandoc}); got != fake {
+		t.Errorf("findBinary = %q, want %q", got, fake)
+	}
+	if got := findBinary("pandoc", []string{empty}); got != "pandoc" {
+		t.Errorf("findBinary with no candidate = %q, want the bare name for PATH", got)
+	}
+}
+
+func TestReadDocument_Docx_FindsHomebrewPandocWithoutPATH(t *testing.T) {
+	pandoc := findBinary("pandoc", binaryDirs)
+	if pandoc == "pandoc" {
+		t.Skip("no pandoc in /opt/homebrew/bin or /usr/local/bin")
+	}
+
+	r, dir := newTestReader(t)
+	source := filepath.Join(dir, "source.md")
+	writeFile(t, dir, "source.md", "# Heading\n\nBody text from docx.")
+	if out, err := exec.Command(pandoc, source, "-o", filepath.Join(dir, "doc.docx")).CombinedOutput(); err != nil {
+		t.Skipf("pandoc could not build the fixture: %v %s", err, out)
+	}
+
+	// The bare PATH an MCP client may give the server.
+	t.Setenv("PATH", t.TempDir())
+	r = NewReader(dir)
+
+	got, err := r.ReadDocument(t.Context(), "doc.docx", 0)
+	if err != nil {
+		t.Fatalf("ReadDocument(.docx) with an empty PATH: %v", err)
+	}
+	if !strings.Contains(got, "Body text from docx") {
+		t.Errorf("docx text not extracted: %q", got)
+	}
+
+	formats := r.ListFormats()
+	for _, format := range formats {
+		if format.Extension == ".docx" && !format.Installed {
+			t.Errorf("ListFormats reports pandoc missing although %s exists", pandoc)
+		}
 	}
 }

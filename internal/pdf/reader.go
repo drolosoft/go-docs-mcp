@@ -65,6 +65,7 @@ type Reader struct {
 	pdfimagesBin string
 	pdftoppmBin  string
 	tesseractBin string
+	pandocBin    string
 	hasOCR       bool // true if both pdftoppm and tesseract are available
 
 	mu    sync.RWMutex
@@ -155,30 +156,32 @@ func isContextError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
+// binaryDirs are the directories searched for a binary before PATH. An MCP
+// client often starts the server with a bare PATH that misses Homebrew,
+// which installs into /opt/homebrew/bin on Apple silicon and /usr/local/bin
+// on Intel Macs.
+var binaryDirs = []string{"/opt/homebrew/bin", "/usr/local/bin"}
+
+// findBinary returns the path of name in the first of dirs that holds it, or
+// the bare name so that exec looks it up in PATH.
+func findBinary(name string, dirs []string) string {
+	for _, dir := range dirs {
+		candidate := filepath.Join(dir, name)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return name
+}
+
 // NewReader creates a new PDF reader for the given documents directory.
 func NewReader(docsDir string) *Reader {
-	pdftotextBin := "pdftotext"
-	pdfinfoBin := "pdfinfo"
-	pdfimagesBin := "pdfimages"
-	pdftoppmBin := "pdftoppm"
-	tesseractBin := "tesseract"
-
-	// Check for Homebrew installation on macOS
-	if _, err := os.Stat("/opt/homebrew/bin/pdftotext"); err == nil {
-		pdftotextBin = "/opt/homebrew/bin/pdftotext"
-	}
-	if _, err := os.Stat("/opt/homebrew/bin/pdfinfo"); err == nil {
-		pdfinfoBin = "/opt/homebrew/bin/pdfinfo"
-	}
-	if _, err := os.Stat("/opt/homebrew/bin/pdfimages"); err == nil {
-		pdfimagesBin = "/opt/homebrew/bin/pdfimages"
-	}
-	if _, err := os.Stat("/opt/homebrew/bin/pdftoppm"); err == nil {
-		pdftoppmBin = "/opt/homebrew/bin/pdftoppm"
-	}
-	if _, err := os.Stat("/opt/homebrew/bin/tesseract"); err == nil {
-		tesseractBin = "/opt/homebrew/bin/tesseract"
-	}
+	pdftotextBin := findBinary("pdftotext", binaryDirs)
+	pdfinfoBin := findBinary("pdfinfo", binaryDirs)
+	pdfimagesBin := findBinary("pdfimages", binaryDirs)
+	pdftoppmBin := findBinary("pdftoppm", binaryDirs)
+	tesseractBin := findBinary("tesseract", binaryDirs)
+	pandocBin := findBinary("pandoc", binaryDirs)
 
 	// Determine OCR availability
 	_, errPdftoppm := exec.LookPath(pdftoppmBin)
@@ -192,6 +195,7 @@ func NewReader(docsDir string) *Reader {
 		pdfimagesBin: pdfimagesBin,
 		pdftoppmBin:  pdftoppmBin,
 		tesseractBin: tesseractBin,
+		pandocBin:    pandocBin,
 		hasOCR:       hasOCR,
 		cache:        make(map[string]*cacheEntry),
 	}
@@ -267,11 +271,11 @@ func readTextFile(path string) (string, error) {
 }
 
 // readDocx converts a .docx to plain text with pandoc.
-func readDocx(ctx context.Context, path string) (string, error) {
-	if _, err := exec.LookPath("pandoc"); err != nil {
+func (r *Reader) readDocx(ctx context.Context, path string) (string, error) {
+	if _, err := exec.LookPath(r.pandocBin); err != nil {
 		return "", fmt.Errorf("reading .docx requires pandoc (install pandoc and retry)")
 	}
-	out, err := runTool(ctx, toolTimeout, nil, path, "pandoc", "-t", "plain", "--wrap=none", path)
+	out, err := runTool(ctx, toolTimeout, nil, path, r.pandocBin, "-t", "plain", "--wrap=none", path)
 	if err != nil {
 		return "", err
 	}
@@ -285,7 +289,7 @@ func (r *Reader) extractText(ctx context.Context, filename, path string) (string
 	case isTextFormat(filename):
 		return readTextFile(path)
 	case strings.ToLower(filepath.Ext(filename)) == ".docx":
-		return readDocx(ctx, path)
+		return r.readDocx(ctx, path)
 	default:
 		text, _, err := r.readWithOCRFallback(ctx, path, 0, 0)
 		return text, err
@@ -1208,7 +1212,7 @@ type FormatInfo struct {
 func (r *Reader) ListFormats() []FormatInfo {
 	_, errPdftotext := exec.LookPath(r.pdftotextBin)
 	_, errTesseract := exec.LookPath(r.tesseractBin)
-	_, errPandoc := exec.LookPath("pandoc")
+	_, errPandoc := exec.LookPath(r.pandocBin)
 
 	return []FormatInfo{
 		{Extension: ".pdf", Status: "supported", Requires: "poppler", Installed: errPdftotext == nil},
