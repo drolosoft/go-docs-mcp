@@ -234,8 +234,52 @@ func (r *Reader) HasOCR() bool {
 	return r.hasOCR
 }
 
-// supportedExtensions lists all file extensions this tool can work with.
-var supportedExtensions = []string{".pdf", ".txt", ".md", ".csv", ".docx"}
+// pandocFormat ties a file extension to the pandoc reader that converts it.
+type pandocFormat struct {
+	extension string
+	reader    string
+}
+
+// pandocFormats are the formats read through pandoc, in the order
+// list_formats shows them. The reader goes to pandoc with -f, so the format
+// never depends on pandoc's own guess from the file name; .htm and .html
+// share the html reader.
+var pandocFormats = []pandocFormat{
+	{extension: ".docx", reader: "docx"},
+	{extension: ".xlsx", reader: "xlsx"},
+	{extension: ".pptx", reader: "pptx"},
+	{extension: ".odt", reader: "odt"},
+	{extension: ".epub", reader: "epub"},
+	{extension: ".html", reader: "html"},
+	{extension: ".htm", reader: "html"},
+	{extension: ".rtf", reader: "rtf"},
+	{extension: ".ipynb", reader: "ipynb"},
+}
+
+// pandocFormatFor returns the pandoc format of filename's extension and
+// whether pandoc is the way to read that file at all.
+func pandocFormatFor(filename string) (pandocFormat, bool) {
+	extension := strings.ToLower(filepath.Ext(filename))
+	for _, format := range pandocFormats {
+		if format.extension == extension {
+			return format, true
+		}
+	}
+	return pandocFormat{}, false
+}
+
+// pandocExtensions returns the extensions of pandocFormats.
+func pandocExtensions() []string {
+	var extensions []string
+	for _, format := range pandocFormats {
+		extensions = append(extensions, format.extension)
+	}
+	return extensions
+}
+
+// supportedExtensions lists all document extensions this tool can work with:
+// the ones read directly or with poppler, then every pandoc format.
+var supportedExtensions = append([]string{".pdf", ".txt", ".md", ".csv"}, pandocExtensions()...)
 
 // imageExtensions lists supported image file extensions for OCR.
 var imageExtensions = []string{".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp"}
@@ -271,12 +315,23 @@ func readTextFile(path string) (string, error) {
 	return string(data), nil
 }
 
-// readDocx converts a .docx to plain text with pandoc.
-func (r *Reader) readDocx(ctx context.Context, path string) (string, error) {
+// pandocPlain and pandocMarkdown are the pandoc writers this reader uses:
+// plain text for read_document and everything built on it, GitHub-flavoured
+// Markdown for convert_to_markdown, which keeps headings, emphasis and
+// tables that plain text flattens.
+const (
+	pandocPlain    = "plain"
+	pandocMarkdown = "gfm"
+)
+
+// convertWithPandoc converts the document at path from format to the pandoc
+// writer target, without line wrapping so a paragraph stays on one line.
+func (r *Reader) convertWithPandoc(ctx context.Context, path string, format pandocFormat, target string) (string, error) {
 	if _, err := exec.LookPath(r.pandocBin); err != nil {
-		return "", fmt.Errorf("reading .docx requires pandoc (install pandoc and retry)")
+		return "", fmt.Errorf("reading %s requires pandoc (install pandoc and retry)", format.extension)
 	}
-	out, err := runTool(ctx, toolTimeout, nil, path, r.pandocBin, "-t", "plain", "--wrap=none", path)
+
+	out, err := runTool(ctx, toolTimeout, nil, path, r.pandocBin, "-f", format.reader, "-t", target, "--wrap=none", path)
 	if err != nil {
 		return "", err
 	}
@@ -284,17 +339,18 @@ func (r *Reader) readDocx(ctx context.Context, path string) (string, error) {
 }
 
 // extractText dispatches full-text extraction by format: text files verbatim,
-// .docx via pandoc, PDFs via pdftotext with OCR fallback.
+// the pandoc formats as plain text, PDFs via pdftotext with OCR fallback.
 func (r *Reader) extractText(ctx context.Context, filename, path string) (string, error) {
-	switch {
-	case isTextFormat(filename):
+	if isTextFormat(filename) {
 		return readTextFile(path)
-	case strings.ToLower(filepath.Ext(filename)) == ".docx":
-		return r.readDocx(ctx, path)
-	default:
-		text, _, err := r.readWithOCRFallback(ctx, path, 0, 0)
-		return text, err
 	}
+
+	if format, ok := pandocFormatFor(filename); ok {
+		return r.convertWithPandoc(ctx, path, format, pandocPlain)
+	}
+
+	text, _, err := r.readWithOCRFallback(ctx, path, 0, 0)
+	return text, err
 }
 
 // sanitizeFilename ensures the filename is safe (no directory traversal) and has a supported extension.
@@ -1263,14 +1319,20 @@ func (r *Reader) ListFormats() []FormatInfo {
 	_, errTesseract := exec.LookPath(r.tesseractBin)
 	_, errPandoc := exec.LookPath(r.pandocBin)
 
-	return []FormatInfo{
+	formats := []FormatInfo{
 		{Extension: ".pdf", Status: "supported", Requires: "poppler", Installed: errPdftotext == nil},
 		{Extension: ".txt", Status: "supported", Requires: "none", Installed: true},
 		{Extension: ".md", Status: "supported", Requires: "none", Installed: true},
 		{Extension: ".csv", Status: "supported", Requires: "none", Installed: true},
-		{Extension: ".docx", Status: "optional", Requires: "pandoc", Installed: errPandoc == nil},
-		{Extension: ".png/.jpg/.tiff", Status: "optional", Requires: "tesseract", Installed: errTesseract == nil},
 	}
+
+	for _, format := range pandocFormats {
+		formats = append(formats, FormatInfo{Extension: format.extension, Status: "optional", Requires: "pandoc", Installed: errPandoc == nil})
+	}
+
+	formats = append(formats, FormatInfo{Extension: ".png/.jpg/.tiff", Status: "optional", Requires: "tesseract", Installed: errTesseract == nil})
+
+	return formats
 }
 
 // ReadImage performs OCR on a standalone image file using tesseract directly.

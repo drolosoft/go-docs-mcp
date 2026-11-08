@@ -1,6 +1,7 @@
 package pdf
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"fmt"
@@ -1974,5 +1975,195 @@ func TestSearchDocument_OCRTextReportsTheRightPage(t *testing.T) {
 
 	if !strings.Contains(got, "Found 1 matches") || !strings.Contains(got, "page ~2") {
 		t.Errorf("want one match reported on page 2, got:\n%s", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 29. Formats read through pandoc
+// ---------------------------------------------------------------------------
+
+// fixtureMarkdown is the source pandoc turns into the office and e-book
+// fixtures: a heading and a paragraph with bold text, so a test can tell
+// Markdown output (# and **) from plain text.
+const fixtureMarkdown = "# Heading\n\nBody text with **bold** words.\n"
+
+// requirePandoc returns the pandoc the reader would use, or skips the test
+// with a message that says pandoc is missing, so the log never shows a
+// pandoc test as passed on a machine that could not run it.
+func requirePandoc(t *testing.T) string {
+	t.Helper()
+	pandoc := findBinary("pandoc", binaryDirs)
+	if _, err := exec.LookPath(pandoc); err != nil {
+		t.Skip("pandoc not installed: skipping the test of the pandoc-backed formats")
+	}
+	return pandoc
+}
+
+// writePandocOutput has pandoc write fixtureMarkdown as the format of name's
+// extension into dir.
+func writePandocOutput(t *testing.T, pandoc, dir, name string) {
+	t.Helper()
+	source := filepath.Join(t.TempDir(), "source.md")
+	if err := os.WriteFile(source, []byte(fixtureMarkdown), 0o644); err != nil {
+		t.Fatalf("failed to write the pandoc source: %v", err)
+	}
+
+	output, err := exec.Command(pandoc, source, "-o", filepath.Join(dir, name)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pandoc could not write %s: %v %s", name, err, output)
+	}
+}
+
+// writeMinimalXLSX writes the smallest workbook pandoc reads: one sheet with
+// a header row of two shared strings and one numeric cell. pandoc can read
+// xlsx but not write it, and it ignores inline strings, hence the shared
+// strings part.
+func writeMinimalXLSX(t *testing.T, path string) {
+	t.Helper()
+
+	parts := []struct {
+		name    string
+		content string
+	}{
+		{"[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>`},
+		{"_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`},
+		{"xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>`},
+		{"xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>`},
+		{"xl/sharedStrings.xml", `<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="2" uniqueCount="2"><si><t>Name</t></si><si><t>Body text with bold words</t></si></sst>`},
+		{"xl/worksheets/sheet1.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2"><v>42</v></c></row></sheetData></worksheet>`},
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("failed to create %s: %v", path, err)
+	}
+	defer file.Close()
+
+	archive := zip.NewWriter(file)
+	for _, part := range parts {
+		writer, err := archive.Create(part.name)
+		if err != nil {
+			t.Fatalf("failed to add %s to the workbook: %v", part.name, err)
+		}
+		if _, err := writer.Write([]byte(part.content)); err != nil {
+			t.Fatalf("failed to write %s: %v", part.name, err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatalf("failed to finish the workbook: %v", err)
+	}
+}
+
+// pandocFixtureHTML is a page with the same heading and paragraph as
+// fixtureMarkdown.
+const pandocFixtureHTML = "<!doctype html><html><head><title>Fixture</title></head><body><h1>Heading</h1><p>Body text with <b>bold</b> words.</p></body></html>"
+
+// pandocFixtureRTF is a paragraph with a bold run; pandoc keeps the bold.
+const pandocFixtureRTF = `{\rtf1\ansi Body text with {\b bold} words.\par}`
+
+// pandocFixtureNotebook is a notebook with one Markdown cell.
+const pandocFixtureNotebook = `{"cells":[{"cell_type":"markdown","metadata":{},"source":["# Heading\n","\n","Body text with **bold** words."]}],"metadata":{},"nbformat":4,"nbformat_minor":5}`
+
+// pandocFixtureCase is one pandoc-backed format with the Markdown that
+// convert_to_markdown must produce from its fixture.
+type pandocFixtureCase struct {
+	name         string
+	write        func(t *testing.T, pandoc, dir, name string)
+	wantMarkdown string
+}
+
+// writeTextFixture returns a fixture writer for a format written by hand.
+func writeTextFixture(content string) func(t *testing.T, pandoc, dir, name string) {
+	return func(t *testing.T, pandoc, dir, name string) {
+		writeFile(t, dir, name, content)
+	}
+}
+
+// pandocFixtureCases covers every extension that goes through pandoc.
+var pandocFixtureCases = []pandocFixtureCase{
+	{"letter.docx", writePandocOutput, "# Heading"},
+	{"slides.pptx", writePandocOutput, "## Heading"},
+	{"essay.odt", writePandocOutput, "**bold**"},
+	{"book.epub", writePandocOutput, "# Heading"},
+	{"sheet.xlsx", func(t *testing.T, pandoc, dir, name string) { writeMinimalXLSX(t, filepath.Join(dir, name)) }, "| Name |"},
+	{"page.html", writeTextFixture(pandocFixtureHTML), "# Heading"},
+	{"old-page.htm", writeTextFixture(pandocFixtureHTML), "**bold**"},
+	{"memo.rtf", writeTextFixture(pandocFixtureRTF), "**bold**"},
+	{"analysis.ipynb", writeTextFixture(pandocFixtureNotebook), "# Heading"},
+}
+
+func TestReadDocument_PandocFormats(t *testing.T) {
+	pandoc := requirePandoc(t)
+
+	for _, testCase := range pandocFixtureCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			r, dir := newTestReader(t)
+			testCase.write(t, pandoc, dir, testCase.name)
+
+			got, err := r.ReadDocument(t.Context(), testCase.name, 0)
+			if err != nil {
+				t.Fatalf("ReadDocument(%s): %v", testCase.name, err)
+			}
+			if !strings.Contains(got, "Body text with") {
+				t.Errorf("ReadDocument(%s) misses the body text: %q", testCase.name, got)
+			}
+
+			// read_document returns plain text, without Markdown marks.
+			if strings.Contains(got, "**") {
+				t.Errorf("ReadDocument(%s) should be plain text, got %q", testCase.name, got)
+			}
+		})
+	}
+}
+
+func TestReadDocument_PandocFormatsRequirePandoc(t *testing.T) {
+	r, dir := newTestReader(t)
+
+	// A pandoc that is not there, whatever this machine has installed.
+	r.pandocBin = filepath.Join(dir, "no-such-pandoc")
+
+	for _, testCase := range pandocFixtureCases {
+		writeFile(t, dir, testCase.name, "not really this format")
+
+		_, err := r.ReadDocument(t.Context(), testCase.name, 0)
+		wantExtension := filepath.Ext(testCase.name)
+		if err == nil || !strings.Contains(err.Error(), "pandoc") || !strings.Contains(err.Error(), wantExtension) {
+			t.Errorf("ReadDocument(%s) without pandoc: want an error naming pandoc and %s, got %v", testCase.name, wantExtension, err)
+		}
+	}
+}
+
+func TestPandocFormats_AreListedEverywhere(t *testing.T) {
+	r, dir := newTestReader(t)
+
+	formats := map[string]FormatInfo{}
+	for _, format := range r.ListFormats() {
+		formats[format.Extension] = format
+	}
+
+	for _, testCase := range pandocFixtureCases {
+		writeFile(t, dir, testCase.name, "listed whatever it holds")
+		extension := filepath.Ext(testCase.name)
+
+		if _, err := r.sanitizeFilename(testCase.name); err != nil {
+			t.Errorf("sanitizeFilename(%s): %v", testCase.name, err)
+		}
+
+		format, ok := formats[extension]
+		if !ok {
+			t.Errorf("ListFormats misses %s", extension)
+			continue
+		}
+		if format.Requires != "pandoc" || format.Status != "optional" {
+			t.Errorf("ListFormats %s = %+v, want optional and requiring pandoc", extension, format)
+		}
+	}
+
+	docs, err := r.ListDocuments(t.Context())
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if len(docs) != len(pandocFixtureCases) {
+		t.Errorf("ListDocuments listed %d files, want the %d pandoc fixtures: %+v", len(docs), len(pandocFixtureCases), docs)
 	}
 }
