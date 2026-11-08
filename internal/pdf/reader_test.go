@@ -3,6 +3,7 @@ package pdf
 import (
 	"archive/zip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -2190,5 +2191,90 @@ func TestConvertToMarkdown_PandocFormatsGiveGFM(t *testing.T) {
 				t.Errorf("ConvertToMarkdown(%s) still wraps plain text: %q", testCase.name, got)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 30. Document types in the listing
+// ---------------------------------------------------------------------------
+
+func TestListDocuments_ListsImagesAndNamesEveryType(t *testing.T) {
+	r, dir := newTestReader(t)
+
+	// The PDF is not parsed by the fake pdfinfo, which reports one page.
+	r.pdfinfoBin = writeFakeBinary(t, t.TempDir(), "pdfinfo", "echo 'Pages:          1'\n")
+
+	wantTypes := map[string]string{
+		"report.pdf":   "pdf",
+		"report.txt":   "text",
+		"notes.md":     "markdown",
+		"data.csv":     "csv",
+		"letter.docx":  "docx",
+		"sheet.xlsx":   "xlsx",
+		"slides.pptx":  "pptx",
+		"essay.odt":    "odt",
+		"book.epub":    "epub",
+		"page.html":    "html",
+		"old-page.htm": "html",
+		"memo.rtf":     "rtf",
+		"lab.ipynb":    "ipynb",
+		"photo.png":    "image",
+		"scan.JPG":     "image",
+		"shot.jpeg":    "image",
+		"web.webp":     "image",
+		"fax.tiff":     "image",
+		"fax2.tif":     "image",
+		"icon.bmp":     "image",
+	}
+	for name := range wantTypes {
+		writeFile(t, dir, name, "listed whatever it holds")
+	}
+
+	docs, err := r.ListDocuments(t.Context())
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+
+	gotTypes := map[string]string{}
+	for _, doc := range docs {
+		gotTypes[doc.Filename] = doc.Type
+	}
+	for name, wantType := range wantTypes {
+		gotType, listed := gotTypes[name]
+		if !listed {
+			t.Errorf("ListDocuments misses %s", name)
+			continue
+		}
+		if gotType != wantType {
+			t.Errorf("%s type = %q, want %q", name, gotType, wantType)
+		}
+	}
+}
+
+func TestDocumentInfo_TypeIsInTheJSON(t *testing.T) {
+	data, err := json.Marshal(DocumentInfo{Filename: "photo.png", Type: "image"})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"type":"image"`) {
+		t.Errorf("DocumentInfo JSON = %s, want a \"type\" field", data)
+	}
+}
+
+func TestWebP_IsAnImageFormat(t *testing.T) {
+	r, _ := newTestReader(t)
+
+	if _, err := r.sanitizeImageFilename("diagram.webp"); err != nil {
+		t.Errorf("sanitizeImageFilename(.webp): %v", err)
+	}
+
+	listed := false
+	for _, format := range r.ListFormats() {
+		if format.Requires == "tesseract" && strings.Contains(format.Extension, ".webp") {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Errorf("ListFormats should name .webp among the tesseract formats: %+v", r.ListFormats())
 	}
 }

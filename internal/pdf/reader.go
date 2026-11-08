@@ -13,16 +13,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// DocumentInfo holds metadata about a PDF file.
+// DocumentInfo holds metadata about a file in the documents directory. Type
+// is the kind of document, see documentType, and Pages is 0 for anything
+// that is not a PDF.
 type DocumentInfo struct {
 	Filename  string `json:"filename"`
 	Title     string `json:"title"`
+	Type      string `json:"type"`
 	Pages     int    `json:"pages"`
 	SizeBytes int64  `json:"size_bytes"`
 }
@@ -281,8 +285,9 @@ func pandocExtensions() []string {
 // the ones read directly or with poppler, then every pandoc format.
 var supportedExtensions = append([]string{".pdf", ".txt", ".md", ".csv"}, pandocExtensions()...)
 
-// imageExtensions lists supported image file extensions for OCR.
-var imageExtensions = []string{".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp"}
+// imageExtensions lists supported image file extensions for OCR. tesseract
+// reads WebP through leptonica like the others.
+var imageExtensions = []string{".png", ".jpg", ".jpeg", ".webp", ".tiff", ".tif", ".bmp"}
 
 // textExtensions are read directly from disk; they never go through pdftotext.
 var textExtensions = []string{".txt", ".md", ".csv"}
@@ -296,6 +301,37 @@ func isTextFormat(filename string) bool {
 		}
 	}
 	return false
+}
+
+// isImage reports whether the (sanitized) filename is an image for read_image.
+func isImage(filename string) bool {
+	return slices.Contains(imageExtensions, strings.ToLower(filepath.Ext(filename)))
+}
+
+// documentType names the kind of a listed file for the "type" field of
+// list_documents: "pdf", "text", "markdown", "csv", "image", or the pandoc
+// reader of a pandoc format ("docx", "xlsx", "html" for .htm too, ...). It
+// tells a client which tool fits before it opens the file.
+func documentType(filename string) string {
+	if format, ok := pandocFormatFor(filename); ok {
+		return format.reader
+	}
+	if isImage(filename) {
+		return "image"
+	}
+
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".pdf":
+		return "pdf"
+	case ".txt":
+		return "text"
+	case ".md":
+		return "markdown"
+	case ".csv":
+		return "csv"
+	default:
+		return "unknown"
+	}
 }
 
 // isPDF reports whether the (sanitized) filename is a PDF.
@@ -439,7 +475,8 @@ func (r *Reader) resolveDocument(safe string) (string, error) {
 	return realPath, nil
 }
 
-// ListDocuments returns metadata for all supported files in the documents directory.
+// ListDocuments returns metadata for all supported documents and images in
+// the documents directory.
 func (r *Reader) ListDocuments(ctx context.Context) ([]DocumentInfo, error) {
 	entries, err := os.ReadDir(r.docsDir)
 	if err != nil {
@@ -456,14 +493,9 @@ func (r *Reader) ListDocuments(ctx context.Context) ([]DocumentInfo, error) {
 		name := entry.Name()
 		ext := strings.ToLower(filepath.Ext(name))
 
-		supported := false
-		for _, se := range supportedExtensions {
-			if ext == se {
-				supported = true
-				break
-			}
-		}
-		if !supported {
+		// Images are listed too: read_image and the other tools accept them,
+		// and a client cannot ask for a file it was never shown.
+		if !slices.Contains(supportedExtensions, ext) && !isImage(name) {
 			continue
 		}
 
@@ -488,6 +520,7 @@ func (r *Reader) ListDocuments(ctx context.Context) ([]DocumentInfo, error) {
 		docs = append(docs, DocumentInfo{
 			Filename:  name,
 			Title:     title,
+			Type:      documentType(name),
 			Pages:     pages,
 			SizeBytes: info.Size(),
 		})
@@ -1330,7 +1363,7 @@ func (r *Reader) ListFormats() []FormatInfo {
 		formats = append(formats, FormatInfo{Extension: format.extension, Status: "optional", Requires: "pandoc", Installed: errPandoc == nil})
 	}
 
-	formats = append(formats, FormatInfo{Extension: ".png/.jpg/.tiff", Status: "optional", Requires: "tesseract", Installed: errTesseract == nil})
+	formats = append(formats, FormatInfo{Extension: strings.Join(imageExtensions, "/"), Status: "optional", Requires: "tesseract", Installed: errTesseract == nil})
 
 	return formats
 }
