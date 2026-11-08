@@ -6,6 +6,13 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `extract_images` asks `pdfimages` for PNM instead of PNG and does the
+  decoding, scaling and PNG encoding in Go. On a 2048 x 2048 photo the
+  call went from about 2.3 s to 0.5 s; poppler's own PNG writer was most
+  of that time.
+
 ## [v1.4.0] - 2026-11-08
 
 Formats, paging and distribution. Every v1.3.0 call still works; the new

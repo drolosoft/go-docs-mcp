@@ -3181,3 +3181,32 @@ func TestDecodePNM_RejectsWhatItDoesNotRead(t *testing.T) {
 		}
 	}
 }
+
+func TestPreparePicture_ReadsAPBMAndKeepsAnIconAtItsSize(t *testing.T) {
+	prefix := filepath.Join(t.TempDir(), "img")
+
+	// pdfimages writes a one-bit picture as .pbm, not .ppm; at 10x2 it is
+	// also far under minImageSide and must still go out as it is.
+	raster := pnmFile("P4\n10 2\n", 0b10110000, 0b01000000, 0b11111111, 0b11000000)
+	if err := os.WriteFile(prefix+"-007.pbm", raster, 0o644); err != nil {
+		t.Fatalf("failed to write the PBM: %v", err)
+	}
+
+	info, err := preparePicture(prefix, listedImage{page: 2, number: 7, kind: "image", width: 10, height: 2})
+	if err != nil {
+		t.Fatalf("preparePicture: %v", err)
+	}
+
+	if info.Page != 2 || info.Index != 7 || info.Width != 10 || info.Height != 2 || info.OriginalWidth != 10 {
+		t.Errorf("info = page %d, image %d, %dx%d from %dx%d; want page 2, image 7, 10x2 unscaled", info.Page, info.Index, info.Width, info.Height, info.OriginalWidth, info.OriginalHeight)
+	}
+
+	gray, ok := decodeImage(t, info).(*image.Gray)
+	if !ok || gray.Pix[0] != 0 || gray.Pix[1] != 255 {
+		t.Errorf("the PNG must be grey with a black first pixel and a white second, got %T", decodeImage(t, info))
+	}
+
+	if _, err := preparePicture(prefix, listedImage{page: 2, number: 8, kind: "image"}); err == nil || !strings.Contains(err.Error(), "did not write it") {
+		t.Errorf("a picture pdfimages did not write must say so, got %v", err)
+	}
+}

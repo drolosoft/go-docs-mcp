@@ -1595,9 +1595,13 @@ func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page, m
 	// long document does not have every image written to disk for ten of
 	// them. The first page is the listing's, which keeps pdfimages' image
 	// numbers the same in both runs.
+	//
+	// Without -png, pdfimages writes PNM, which is decoded and encoded as
+	// PNG here. Its own PNG writer tries every row filter at the highest
+	// compression, and on a 2048 px photo that took several times longer
+	// than writing PNM and doing the rest in Go.
 	lastPage := selected[len(selected)-1].page
-	extractArgs := append([]string{"-png"}, firstPageArgs...)
-	extractArgs = append(extractArgs, "-l", strconv.Itoa(lastPage), path, prefix)
+	extractArgs := append(slices.Clone(firstPageArgs), "-l", strconv.Itoa(lastPage), path, prefix)
 
 	if _, err := runTool(ctx, toolTimeout, nil, path, r.pdfimagesBin, extractArgs...); err != nil {
 		return nil, err
@@ -1610,7 +1614,7 @@ func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page, m
 			return nil, err
 		}
 
-		info, err := preparePNG(fmt.Sprintf("%s-%03d.png", prefix, picture.number), picture)
+		info, err := preparePicture(prefix, picture)
 		if err != nil {
 			extraction.Notes = append(extraction.Notes, fmt.Sprintf("image %d on page %d was left out: %v", picture.number, picture.page, err))
 			continue
@@ -1628,56 +1632,53 @@ func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page, m
 	return extraction, nil
 }
 
-// preparePNG reads the PNG pdfimages wrote for picture and returns it as an
-// ImageInfo, scaled to MaxImageSide on the longer side and shrunk further
-// while its base64 is over maxImageBytes. A PNG that is already small enough
-// goes out as pdfimages wrote it, without decoding.
-func preparePNG(filePath string, picture listedImage) (ImageInfo, error) {
-	data, err := os.ReadFile(filePath)
+// pnmExtensions are the files pdfimages writes when it is not asked for
+// PNG: PPM for colour and grey, PBM for one bit a pixel, and PGM, which
+// poppler 25 does not write for pictures but older releases may.
+var pnmExtensions = []string{".ppm", ".pbm", ".pgm"}
+
+// preparePicture reads the PNM pdfimages wrote for picture under prefix and
+// returns it as a PNG ImageInfo, scaled to MaxImageSide on the longer side
+// and shrunk further while its base64 is over maxImageBytes.
+func preparePicture(prefix string, picture listedImage) (ImageInfo, error) {
+	file, err := openPNM(prefix, picture.number)
 	if err != nil {
-		return ImageInfo{}, fmt.Errorf("pdfimages did not write it as PNG: %w", withoutPath(err))
+		return ImageInfo{}, fmt.Errorf("pdfimages did not write it as PNM: %w", withoutPath(err))
+	}
+	defer file.Close()
+
+	decoded, err := decodePNM(file)
+	if err != nil {
+		return ImageInfo{}, err
 	}
 
-	config, err := png.DecodeConfig(bytes.NewReader(data))
-	if err != nil {
-		return ImageInfo{}, fmt.Errorf("unreadable PNG: %w", err)
-	}
-
+	bounds := decoded.Bounds()
 	info := ImageInfo{
 		Page:           picture.page,
 		Index:          picture.number,
 		Format:         "png",
 		MIMEType:       "image/png",
-		OriginalWidth:  config.Width,
-		OriginalHeight: config.Height,
-	}
-
-	width, height := scaledSize(config.Width, config.Height, MaxImageSide)
-	if width == config.Width && height == config.Height && base64.StdEncoding.EncodedLen(len(data)) <= maxImageBytes {
-		info.Width = width
-		info.Height = height
-		info.DataBase64 = base64.StdEncoding.EncodeToString(data)
-		return info, nil
-	}
-
-	if config.Width*config.Height > maxDecodePixels {
-		return ImageInfo{}, fmt.Errorf("%dx%d pixels is too large to decode", config.Width, config.Height)
-	}
-
-	decoded, err := png.Decode(bytes.NewReader(data))
-	if err != nil {
-		return ImageInfo{}, fmt.Errorf("unreadable PNG: %w", err)
+		OriginalWidth:  bounds.Dx(),
+		OriginalHeight: bounds.Dy(),
 	}
 
 	// Every attempt scales the original again, a quarter smaller than the
-	// last, so the quality does not degrade from resampling a resample.
+	// last, so the quality does not degrade from resampling a resample. The
+	// first attempt always runs, so an icon under minImageSide still goes
+	// out at its own size.
+	width, height := scaledSize(bounds.Dx(), bounds.Dy(), MaxImageSide)
 	longest := max(width, height)
 
-	for longest >= minImageSide {
-		width, height = scaledSize(config.Width, config.Height, longest)
+	for {
+		width, height = scaledSize(bounds.Dx(), bounds.Dy(), longest)
+
+		scaled := decoded
+		if width != bounds.Dx() || height != bounds.Dy() {
+			scaled = boxResample(decoded, width, height)
+		}
 
 		var encoded bytes.Buffer
-		if err := png.Encode(&encoded, boxResample(decoded, width, height)); err != nil {
+		if err := png.Encode(&encoded, scaled); err != nil {
 			return ImageInfo{}, fmt.Errorf("failed to encode PNG: %w", err)
 		}
 
@@ -1689,9 +1690,29 @@ func preparePNG(filePath string, picture listedImage) (ImageInfo, error) {
 		}
 
 		longest = longest * 3 / 4
+		if longest < minImageSide {
+			return ImageInfo{}, fmt.Errorf("does not fit in %d MB even at %d px", maxImageBytes>>20, minImageSide)
+		}
+	}
+}
+
+// openPNM opens the file pdfimages wrote for image number under prefix,
+// whichever of the PNM extensions it has.
+func openPNM(prefix string, number int) (*os.File, error) {
+	var lastErr error
+
+	for _, extension := range pnmExtensions {
+		file, err := os.Open(fmt.Sprintf("%s-%03d%s", prefix, number, extension))
+		if err == nil {
+			return file, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		lastErr = err
 	}
 
-	return ImageInfo{}, fmt.Errorf("does not fit in %d MB even at %d px", maxImageBytes>>20, minImageSide)
+	return nil, lastErr
 }
 
 // scaledSize returns width and height scaled so the longer side is at most

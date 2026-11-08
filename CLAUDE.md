@@ -31,7 +31,7 @@ DOCS_MCP_DIR=~/docs ./go-docs-mcp   # custom dir
 - Text tools page their output: `offset` + `max_chars` (default 50000, cap 200000) with a trailer naming the next offset; `search_document` has `max_results`; `extract_images` returns PNG image content, skips masks, scales to 1600 px, 8 MB budget
 - Structured output (`outputSchema` + `structuredContent`) on list_documents, list_formats, get_document_metadata, get_document_outline, extract_tables (text JSON kept for old clients), and on the paged read_document, convert_to_markdown and ocr_document (`text`, `next_offset`, `total_chars`)
 - URL downloads: 60 s timeout, 50MB cap, `application/pdf` or `text/*`, private/loopback/link-local hosts refused on every hop
-- Image extraction: `pdfimages -list` first, only rows of type `image` (soft masks skipped), `-png`, box-filtered to 1600 px, 4 MB per image, `max_images` (default 10) and 8 MB per answer
+- Image extraction: `pdfimages -list` first, only rows of type `image` (soft masks skipped), extracted as PNM (not `-png`: poppler's PNG writer is the slow part) and decoded in Go, box-filtered to 1600 px, 4 MB per image, `max_images` (default 10) and 8 MB per answer
 - Tool results over 9 MB are replaced with an error (`server.WithToolResultSizeLimit`)
 - Supports: PDF, TXT, MD, CSV, and through pandoc DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, IPYNB; images (PNG, JPG, WebP, TIFF, BMP) with tesseract
 
