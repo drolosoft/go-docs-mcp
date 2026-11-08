@@ -855,12 +855,21 @@ func (r *Reader) ocrPages(ctx context.Context, path string, firstPage, lastPage 
 	return strings.Join(parts, ""), nil
 }
 
-// OCRDocument performs OCR on a document in the configured directory.
+// errOCRNeedsPDF is returned when ocr_document is asked for a file that is
+// not a PDF. pdftoppm cannot render anything else, and the error used to be
+// a confusing poppler complaint; images have read_image of their own.
+var errOCRNeedsPDF = errors.New("ocr_document only works on PDF files; use read_image for images")
+
+// OCRDocument performs OCR on a PDF in the configured directory.
 // Forces OCR regardless of whether pdftotext works. Useful for garbled text.
 func (r *Reader) OCRDocument(ctx context.Context, filename string, page int, language string) (string, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return "", err
+	}
+
+	if !isPDF(safe) {
+		return "", fmt.Errorf("%w (%s is %s)", errOCRNeedsPDF, safe, filepath.Ext(safe))
 	}
 
 	language, err = ocrLanguage(language)

@@ -1904,3 +1904,26 @@ func TestErrors_DoNotLeakAbsolutePaths(t *testing.T) {
 	_, err = r.ReadFilePages(t.Context(), filepath.Join(dir, "download.pdf"), "1")
 	assertNoAbsolutePath(t, "ReadFilePages(missing)", err, dir)
 }
+
+// ---------------------------------------------------------------------------
+// 27. ocr_document is for PDFs
+// ---------------------------------------------------------------------------
+
+func TestOCRDocument_RejectsNonPDFFiles(t *testing.T) {
+	r, dir := newTestReader(t)
+	log := newInvocationLog(t)
+	useFakeOCR(t, r, log, "should never be used")
+
+	for _, name := range []string{"photo.png", "notes.md", "letter.docx"} {
+		writeFile(t, dir, name, "not a PDF")
+
+		_, err := r.OCRDocument(t.Context(), name, 0, "")
+		if err == nil || !strings.Contains(err.Error(), "ocr_document only works on PDF files; use read_image for images") {
+			t.Errorf("OCRDocument(%s): want the 'only works on PDF files' error, got %v", name, err)
+		}
+	}
+
+	if runs := log.count(t, "tesseract") + log.count(t, "pdftoppm"); runs != 0 {
+		t.Errorf("OCR binaries ran %d times for files that are not PDFs, want 0", runs)
+	}
+}
