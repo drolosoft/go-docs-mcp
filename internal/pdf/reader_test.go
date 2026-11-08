@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // newTestReader creates a Reader pointing at a temp directory with test files.
@@ -274,7 +275,7 @@ func TestReadDocument_TextFormats_RejectPageSelection(t *testing.T) {
 func TestSearchDocument_TextFile_FindsMatches(t *testing.T) {
 	r, dir := newTestReader(t)
 	writeFile(t, dir, "log.txt", "alpha\nbeta needle here\ngamma")
-	out, err := r.SearchDocument(t.Context(), "log.txt", "needle")
+	out, err := r.SearchDocument(t.Context(), "log.txt", "needle", DefaultSearchResults)
 	if err != nil {
 		t.Fatalf("SearchDocument(.txt): %v", err)
 	}
@@ -392,7 +393,7 @@ func TestReadDocument_UnsupportedExtension(t *testing.T) {
 func TestSearchDocument_InvalidFilename(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.SearchDocument(t.Context(), "../etc/passwd", "root")
+	_, err := r.SearchDocument(t.Context(), "../etc/passwd", "root", DefaultSearchResults)
 	if err == nil {
 		t.Error("SearchDocument() with traversal: expected error, got nil")
 	}
@@ -401,7 +402,7 @@ func TestSearchDocument_InvalidFilename(t *testing.T) {
 func TestSearchDocument_NotFound(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.SearchDocument(t.Context(), "missing.txt", "hello")
+	_, err := r.SearchDocument(t.Context(), "missing.txt", "hello", DefaultSearchResults)
 	if err == nil {
 		t.Error("SearchDocument() for missing file: expected error, got nil")
 	}
@@ -1295,7 +1296,7 @@ func TestDocuments_SymlinkOutsideDirIsRejected(t *testing.T) {
 	// Every tool that opens a document by name must refuse the outward link.
 	calls := map[string]func() (any, error){
 		"ReadDocument":        func() (any, error) { return r.ReadDocument(t.Context(), "innocent.md", 0) },
-		"SearchDocument":      func() (any, error) { return r.SearchDocument(t.Context(), "innocent.md", "SECRET") },
+		"SearchDocument":      func() (any, error) { return r.SearchDocument(t.Context(), "innocent.md", "SECRET", 5) },
 		"GetDocumentSummary":  func() (any, error) { return r.GetDocumentSummary(t.Context(), "innocent.md") },
 		"GetDocumentOutline":  func() (any, error) { return r.GetDocumentOutline(t.Context(), "innocent.md") },
 		"ExtractTables":       func() (any, error) { return r.ExtractTables(t.Context(), "innocent.md", 0) },
@@ -1970,7 +1971,7 @@ func TestSearchDocument_OCRTextReportsTheRightPage(t *testing.T) {
 	writeFile(t, dir, "scan.pdf", "%PDF-1.4 never parsed by the fakes")
 	useFakePagedOCR(t, r, 3)
 
-	got, err := r.SearchDocument(t.Context(), "scan.pdf", "needle")
+	got, err := r.SearchDocument(t.Context(), "scan.pdf", "needle", DefaultSearchResults)
 	if err != nil {
 		t.Fatalf("SearchDocument on a scanned PDF: %v", err)
 	}
@@ -2544,5 +2545,196 @@ func TestTextCache_ConcurrentReadersAndWritersKeepTheCap(t *testing.T) {
 	}
 	if cache.size != int64(cache.order.Len())*int64(len(text)) {
 		t.Errorf("cache size %d does not match its %d entries", cache.size, cache.order.Len())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Text paging
+// ---------------------------------------------------------------------------
+
+func TestPageText_ReturnsTheWholeTextWhenItFits(t *testing.T) {
+	page, err := PageText("short text", 0, DefaultMaxChars)
+	if err != nil {
+		t.Fatalf("PageText: %v", err)
+	}
+
+	if page.Text != "short text" || page.NextOffset != 0 || page.TotalChars != 10 {
+		t.Errorf("PageText = %+v, want the whole text, no next offset, 10 chars", page)
+	}
+	if page.TextWithTrailer() != "short text" {
+		t.Errorf("a complete page must carry no trailer, got %q", page.TextWithTrailer())
+	}
+}
+
+func TestPageText_CutsAndPointsAtTheNextOffset(t *testing.T) {
+	text := strings.Repeat("a", 120)
+
+	page, err := PageText(text, 0, 50)
+	if err != nil {
+		t.Fatalf("PageText: %v", err)
+	}
+
+	if page.Text != strings.Repeat("a", 50) {
+		t.Errorf("first page has %d chars, want 50", len(page.Text))
+	}
+	if page.NextOffset != 50 || page.TotalChars != 120 {
+		t.Errorf("NextOffset = %d, TotalChars = %d; want 50, 120", page.NextOffset, page.TotalChars)
+	}
+
+	wantTrailer := "\n\n[truncated: showing chars 0-50 of 120; call again with offset=50]"
+	if got := page.TextWithTrailer(); got != page.Text+wantTrailer {
+		t.Errorf("TextWithTrailer ends with %q, want %q", strings.TrimPrefix(got, page.Text), wantTrailer)
+	}
+
+	last, err := PageText(text, 100, 50)
+	if err != nil {
+		t.Fatalf("PageText at offset 100: %v", err)
+	}
+	if last.Text != strings.Repeat("a", 20) || last.NextOffset != 0 {
+		t.Errorf("last page = %d chars, next %d; want 20 chars and no next offset", len(last.Text), last.NextOffset)
+	}
+	if last.TextWithTrailer() != last.Text {
+		t.Error("the last page must carry no trailer")
+	}
+}
+
+func TestPageText_CountsRunesNotBytes(t *testing.T) {
+	// Every character here takes two or three bytes in UTF-8; a byte slice
+	// would cut one in half and leave invalid UTF-8.
+	text := "ñandú café 日本語 ñandú"
+
+	var pieces []string
+	offset := 0
+	for {
+		page, err := PageText(text, offset, 4)
+		if err != nil {
+			t.Fatalf("PageText(offset=%d): %v", offset, err)
+		}
+		if !utf8.ValidString(page.Text) {
+			t.Fatalf("page at offset %d is not valid UTF-8: %q", offset, page.Text)
+		}
+		if got := utf8.RuneCountInString(page.Text); got > 4 {
+			t.Fatalf("page at offset %d has %d chars, want at most 4", offset, got)
+		}
+		pieces = append(pieces, page.Text)
+
+		if page.NextOffset == 0 {
+			break
+		}
+		offset = page.NextOffset
+	}
+
+	if strings.Join(pieces, "") != text {
+		t.Errorf("the pages joined give %q, want %q", strings.Join(pieces, ""), text)
+	}
+}
+
+func TestPageText_CapsMaxChars(t *testing.T) {
+	text := strings.Repeat("a", MaxCharsLimit+10)
+
+	page, err := PageText(text, 0, MaxCharsLimit*5)
+	if err != nil {
+		t.Fatalf("PageText: %v", err)
+	}
+
+	if len(page.Text) != MaxCharsLimit || page.NextOffset != MaxCharsLimit {
+		t.Errorf("page has %d chars and next offset %d, want both %d", len(page.Text), page.NextOffset, MaxCharsLimit)
+	}
+}
+
+func TestPageText_RejectsBadArguments(t *testing.T) {
+	cases := []struct {
+		name     string
+		offset   int
+		maxChars int
+	}{
+		{"negative offset", -1, 10},
+		{"offset past the end", 11, 10},
+		{"zero max_chars", 0, 0},
+		{"negative max_chars", 0, -3},
+	}
+
+	for _, testCase := range cases {
+		if _, err := PageText("0123456789", testCase.offset, testCase.maxChars); err == nil {
+			t.Errorf("%s: expected an error", testCase.name)
+		}
+	}
+}
+
+func TestPageText_OffsetAtTheEndGivesAnEmptyPage(t *testing.T) {
+	page, err := PageText("0123456789", 10, 5)
+	if err != nil {
+		t.Fatalf("PageText: %v", err)
+	}
+
+	if page.Text != "" || page.NextOffset != 0 || page.TotalChars != 10 {
+		t.Errorf("PageText at the end = %+v, want an empty last page of 10", page)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Search result cap
+// ---------------------------------------------------------------------------
+
+func TestSearchDocument_StopsAtMaxResultsAndSaysHowManyThereAre(t *testing.T) {
+	r, dir := newTestReader(t)
+
+	var lines []string
+	for index := range 30 {
+		lines = append(lines, fmt.Sprintf("line %d with a needle", index+1))
+		lines = append(lines, "filler", "filler", "filler", "filler", "filler")
+	}
+	writeFile(t, dir, "log.txt", strings.Join(lines, "\n"))
+
+	got, err := r.SearchDocument(t.Context(), "log.txt", "needle", 5)
+	if err != nil {
+		t.Fatalf("SearchDocument: %v", err)
+	}
+
+	if count := strings.Count(got, "--- Match "); count != 5 {
+		t.Errorf("rendered %d matches, want 5:\n%s", count, got)
+	}
+	if !strings.Contains(got, "Found 30 matches") || !strings.Contains(got, "showing the first 5") {
+		t.Errorf("the header must give the real total and the cap, got:\n%s", got)
+	}
+	if strings.Contains(got, "line 6 with") {
+		t.Error("a match past max_results was rendered")
+	}
+}
+
+func TestSearchDocument_UnderTheCapHasNoNote(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "log.txt", "one needle\ntwo needle")
+
+	got, err := r.SearchDocument(t.Context(), "log.txt", "needle", 5)
+	if err != nil {
+		t.Fatalf("SearchDocument: %v", err)
+	}
+
+	if strings.Contains(got, "showing the first") {
+		t.Errorf("no cap note expected when every match is shown, got:\n%s", got)
+	}
+}
+
+func TestSearchDocument_RejectsMaxResultsBelowOne(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "log.txt", "needle")
+
+	if _, err := r.SearchDocument(t.Context(), "log.txt", "needle", 0); err == nil {
+		t.Error("max_results 0 must be an error")
+	}
+}
+
+func TestSearchDocument_CapsMaxResults(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "log.txt", strings.Repeat("needle\n", MaxSearchResultsLimit+20))
+
+	got, err := r.SearchDocument(t.Context(), "log.txt", "needle", MaxSearchResultsLimit*10)
+	if err != nil {
+		t.Fatalf("SearchDocument: %v", err)
+	}
+
+	if count := strings.Count(got, "--- Match "); count != MaxSearchResultsLimit {
+		t.Errorf("rendered %d matches, want the cap of %d", count, MaxSearchResultsLimit)
 	}
 }

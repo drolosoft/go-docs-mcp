@@ -46,13 +46,17 @@ var expectedToolNames = []string{
 }
 
 // expectedStructuredTools are the tools that must advertise an outputSchema
-// and answer with structuredContent, sorted.
+// and answer with structuredContent, sorted: the five JSON tools and the
+// three that page a document's text.
 var expectedStructuredTools = []string{
+	"convert_to_markdown",
 	"extract_tables",
 	"get_document_metadata",
 	"get_document_outline",
 	"list_documents",
 	"list_formats",
+	"ocr_document",
+	"read_document",
 }
 
 // expectedResourceURIs are the fixtures as resources/list must name them,

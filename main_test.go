@@ -424,13 +424,17 @@ func TestRedactPaths(t *testing.T) {
 }
 
 // structuredTools are the tools whose answer is JSON, so they also return it
-// as structuredContent and describe its shape in an outputSchema.
+// as structuredContent and describe its shape in an outputSchema, and the
+// tools that page a document's text, whose page goes out the same way.
 var structuredTools = []string{
 	"list_documents",
 	"list_formats",
 	"get_document_metadata",
 	"get_document_outline",
 	"extract_tables",
+	"read_document",
+	"convert_to_markdown",
+	"ocr_document",
 }
 
 func TestStructuredToolsAdvertiseOutputSchema(t *testing.T) {

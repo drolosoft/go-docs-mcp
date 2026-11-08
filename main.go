@@ -321,7 +321,7 @@ func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("read_document",
-		mcp.WithDescription("Read text content from a document with optional page selection. Use this when you need the raw text of a PDF, TXT, MD, CSV, or DOCX file; TXT/MD/CSV are returned verbatim, DOCX via pandoc; PDFs support page ranges (e.g. \"1-5\", \"1-3,7,10-12\") and auto-OCR fallback for scanned pages. Read-only."),
+		mcp.WithDescription("Read text content from a document with optional page selection. Use this when you need the raw text of a PDF, TXT, MD, CSV, or DOCX file; TXT/MD/CSV are returned verbatim, DOCX via pandoc; PDFs support page ranges (e.g. \"1-5\", \"1-3,7,10-12\") and auto-OCR fallback for scanned pages. Long texts come in pages of max_chars characters; a truncated result ends with the offset to ask for next. Read-only."),
 		mcp.WithTitleAnnotation("Read Document"),
 		readOnlyHints(false),
 		mcp.WithString("filename",
@@ -334,6 +334,7 @@ func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 		mcp.WithString("pages",
 			mcp.Description("Optional page ranges to read (PDF only), e.g. \"1-5\", \"10\", \"1-3,7,10-12\". Overrides 'page' if both provided."),
 		),
+		textPagingOptions(),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -349,7 +350,7 @@ func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Error reading document pages: %v", err)), nil
 			}
-			return mcp.NewToolResultText(text), nil
+			return pagedTextResult(request, text), nil
 		}
 
 		page := request.GetInt("page", 0)
@@ -358,7 +359,7 @@ func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error reading document: %v", err)), nil
 		}
 
-		return mcp.NewToolResultText(text), nil
+		return pagedTextResult(request, text), nil
 	})
 }
 
@@ -375,6 +376,12 @@ func registerSearchDocument(s *server.MCPServer, reader *pdf.Reader) {
 			mcp.Required(),
 			mcp.Description("The search query (case-insensitive)"),
 		),
+		mcp.WithInteger("max_results",
+			mcp.Description(fmt.Sprintf("Maximum matches to show (default %d, at most %d). The header always counts every match.", pdf.DefaultSearchResults, pdf.MaxSearchResultsLimit)),
+			mcp.Min(1),
+			mcp.Max(pdf.MaxSearchResultsLimit),
+			mcp.DefaultNumber(pdf.DefaultSearchResults),
+		),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -388,7 +395,9 @@ func registerSearchDocument(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError("query parameter is required"), nil
 		}
 
-		result, err := reader.SearchDocument(ctx, filename, query)
+		maxResults := request.GetInt("max_results", pdf.DefaultSearchResults)
+
+		result, err := reader.SearchDocument(ctx, filename, query, maxResults)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error searching document: %v", err)), nil
 		}
@@ -622,6 +631,7 @@ func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 		mcp.WithString("language",
 			mcp.Description("Tesseract language code (default: DOCS_MCP_OCR_LANG, or \"eng\"). Use \"spa\" for Spanish, \"fra\" for French, etc. Run 'tesseract --list-langs' to see available languages."),
 		),
+		textPagingOptions(),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -655,11 +665,13 @@ func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 
 		progress.notify(ctx, float64(max(pages, 1)), float64(pages), "OCR done")
 
+		// The notice goes through the pager too, so every success of this tool
+		// carries the structured content its output schema promises.
 		if strings.TrimSpace(text) == "" {
-			return mcp.NewToolResultText("[OCR completed but no text was detected on the page(s)]"), nil
+			text = "[OCR completed but no text was detected on the page(s)]"
 		}
 
-		return mcp.NewToolResultText(text), nil
+		return pagedTextResult(request, text), nil
 	})
 }
 
@@ -1050,13 +1062,14 @@ func registerExtractTables(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerConvertToMarkdown(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("convert_to_markdown",
-		mcp.WithDescription("Convert a document to clean Markdown format. Use this when you need structured, readable output from any document; for PDFs headings are detected and formatted, for TXT/CSV content is wrapped in code blocks, and MD files are returned as-is. Read-only."),
+		mcp.WithDescription("Convert a document to clean Markdown format. Use this when you need structured, readable output from any document; for PDFs headings are detected and formatted, for TXT/CSV content is wrapped in code blocks, and MD files are returned as-is. Long output comes in pages of max_chars characters, like read_document. Read-only."),
 		mcp.WithTitleAnnotation("Convert to Markdown"),
 		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to convert"),
 		),
+		textPagingOptions(),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1070,6 +1083,6 @@ func registerConvertToMarkdown(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error converting to markdown: %v", err)), nil
 		}
 
-		return mcp.NewToolResultText(markdown), nil
+		return pagedTextResult(request, markdown), nil
 	})
 }

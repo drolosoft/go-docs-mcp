@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // DocumentInfo holds metadata about a file in the documents directory. Type
@@ -1137,9 +1138,109 @@ func (r *Reader) readWithOCRFallback(ctx context.Context, path string, firstPage
 	return ocrText, "ocr", nil
 }
 
+// DefaultMaxChars is how much text read_document, convert_to_markdown and
+// ocr_document return per call when the client does not say. 50,000
+// characters are about 12,000 tokens: a long chapter, and well under what an
+// MCP client accepts from one tool call.
+const DefaultMaxChars = 50000
+
+// MaxCharsLimit caps max_chars whatever the client asks for. 200,000
+// characters are about 50,000 tokens, the most a single result should take
+// of a model's context; a longer read is several calls with offset.
+const MaxCharsLimit = 200000
+
+// TextPage is one slice of a document's text. Offsets count characters
+// (Unicode code points), not bytes, so a client can page through any
+// language without cutting a character in half.
+type TextPage struct {
+	Text       string `json:"text" jsonschema:"The text of this page of the document"`
+	NextOffset int    `json:"next_offset,omitempty" jsonschema:"Offset to pass on the next call; absent when this page reaches the end"`
+	TotalChars int    `json:"total_chars" jsonschema:"Length of the whole text in characters"`
+
+	// offset is where Text starts, kept for the trailer.
+	offset int
+}
+
+// PageText returns at most maxChars characters of text starting at the
+// character offset. maxChars above MaxCharsLimit is lowered to it. An offset
+// equal to the length gives an empty last page; a negative offset, one past
+// the end or a maxChars below 1 is an error the client can correct.
+func PageText(text string, offset, maxChars int) (TextPage, error) {
+	if offset < 0 {
+		return TextPage{}, fmt.Errorf("offset must be 0 or more, got %d", offset)
+	}
+	if maxChars < 1 {
+		return TextPage{}, fmt.Errorf("max_chars must be 1 or more, got %d", maxChars)
+	}
+	maxChars = min(maxChars, MaxCharsLimit)
+
+	totalChars := utf8.RuneCountInString(text)
+	if offset > totalChars {
+		return TextPage{}, fmt.Errorf("offset %d is past the end of the text, which has %d characters", offset, totalChars)
+	}
+
+	start := byteIndexOfChar(text, 0, offset)
+	end := byteIndexOfChar(text, start, maxChars)
+
+	page := TextPage{Text: text[start:end], TotalChars: totalChars, offset: offset}
+
+	// The slice is maxChars long unless it reached the end, so the next
+	// offset is only set when something is left.
+	if offset+maxChars < totalChars {
+		page.NextOffset = offset + maxChars
+	}
+
+	return page, nil
+}
+
+// byteIndexOfChar returns the byte index in text that lies count characters
+// after the byte index from, or len(text) when the text ends first.
+func byteIndexOfChar(text string, from, count int) int {
+	index := from
+
+	for range count {
+		if index >= len(text) {
+			break
+		}
+
+		_, size := utf8.DecodeRuneInString(text[index:])
+		index += size
+	}
+
+	return index
+}
+
+// TextWithTrailer returns the page text and, when the document goes on, a
+// last line that tells the model where this page ends and how to ask for
+// the next one, so a truncated read is never mistaken for the whole document.
+func (page TextPage) TextWithTrailer() string {
+	if page.NextOffset == 0 {
+		return page.Text
+	}
+
+	return fmt.Sprintf("%s\n\n[truncated: showing chars %d-%d of %d; call again with offset=%d]", page.Text, page.offset, page.NextOffset, page.TotalChars, page.NextOffset)
+}
+
+// DefaultSearchResults is how many matches search_document shows when the
+// client does not say. Fifty matches with their context fit comfortably in
+// one result and are more than a model reads before refining the query.
+const DefaultSearchResults = 50
+
+// MaxSearchResultsLimit caps max_results. Each match carries five lines of
+// context, and pdftotext -layout lines can be long, so 500 matches is about
+// as much as a result can hold before the server's size limit refuses it.
+const MaxSearchResultsLimit = 500
+
 // SearchDocument searches a document for lines matching the query (case-insensitive).
 // Returns matching lines with 2 lines of context before and after, with page number hints.
-func (r *Reader) SearchDocument(ctx context.Context, filename, query string) (string, error) {
+// Only the first maxResults matches are shown, capped at MaxSearchResultsLimit,
+// but the header counts all of them so the client knows when to narrow the query.
+func (r *Reader) SearchDocument(ctx context.Context, filename, query string, maxResults int) (string, error) {
+	if maxResults < 1 {
+		return "", fmt.Errorf("max_results must be 1 or more, got %d", maxResults)
+	}
+	maxResults = min(maxResults, MaxSearchResultsLimit)
+
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return "", err
@@ -1171,6 +1272,13 @@ func (r *Reader) SearchDocument(ctx context.Context, filename, query string) (st
 
 		if strings.Contains(strings.ToLower(line), queryLower) {
 			matchCount++
+
+			// Matches past the cap are still counted for the header, but
+			// their context is not rendered.
+			if matchCount > maxResults {
+				continue
+			}
+
 			start := i - contextLines
 			if start < 0 {
 				start = 0
@@ -1197,6 +1305,10 @@ func (r *Reader) SearchDocument(ctx context.Context, filename, query string) (st
 	}
 
 	header := fmt.Sprintf("Found %d matches for '%s' in %s:\n\n", matchCount, query, safe)
+	if matchCount > maxResults {
+		header = fmt.Sprintf("Found %d matches for '%s' in %s, showing the first %d; narrow the query or raise max_results to see more:\n\n", matchCount, query, safe, maxResults)
+	}
+
 	return header + strings.Join(results, "\n"), nil
 }
 
