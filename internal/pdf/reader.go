@@ -2,7 +2,9 @@ package pdf
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -242,6 +244,40 @@ func (r *Reader) fullPath(filename string) string {
 	return filepath.Join(r.docsDir, filename)
 }
 
+// errOutsideDocsDir is returned when a name inside the documents directory
+// resolves, through a symlink, to a file that lives somewhere else.
+var errOutsideDocsDir = errors.New("resolves outside the documents directory")
+
+// resolveDocument returns the real path of a sanitized filename. It follows
+// symlinks, because pdftotext, tesseract and pandoc open the path themselves,
+// and refuses any result that leaves the documents directory: a link called
+// innocent.txt must not hand out a file from elsewhere on the disk. A name
+// that does not exist, a dangling link included, is reported as not found.
+func (r *Reader) resolveDocument(safe string) (string, error) {
+	realDir, err := filepath.EvalSymlinks(r.docsDir)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve the documents directory: %w", err)
+	}
+
+	realPath, err := filepath.EvalSymlinks(r.fullPath(safe))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("document not found: %s", safe)
+	}
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve %s: %w", safe, err)
+	}
+
+	// Rel answers ".." or a "../" prefix exactly when the real path is not
+	// below the real directory; comparing string prefixes would accept a
+	// sibling such as /docs-other for /docs.
+	relative, err := filepath.Rel(realDir, realPath)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%s %w", safe, errOutsideDocsDir)
+	}
+
+	return realPath, nil
+}
+
 // ListDocuments returns metadata for all supported files in the documents directory.
 func (r *Reader) ListDocuments() ([]DocumentInfo, error) {
 	entries, err := os.ReadDir(r.docsDir)
@@ -268,14 +304,21 @@ func (r *Reader) ListDocuments() ([]DocumentInfo, error) {
 			continue
 		}
 
-		info, err := entry.Info()
+		// A symlink that leaves the directory or points nowhere is left out
+		// of the listing instead of failing it, and the size is the one of
+		// the file the link reaches, not of the link itself.
+		path, err := r.resolveDocument(name)
 		if err != nil {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
 			continue
 		}
 
 		pages := 0
 		if ext == ".pdf" {
-			pages = r.getPageCount(filepath.Join(r.docsDir, name))
+			pages = r.getPageCount(path)
 		}
 		title := strings.TrimSuffix(name, filepath.Ext(name))
 
@@ -320,9 +363,9 @@ func (r *Reader) ReadDocument(filename string, page int) (string, error) {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	if page > 0 {
@@ -348,9 +391,9 @@ func (r *Reader) ReadDocumentPages(filename, pagesStr string) (string, error) {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	if !isPDF(safe) {
@@ -608,9 +651,9 @@ func (r *Reader) OCRDocument(filename string, page int, language string) (string
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	return r.ocrDocument(path, page, language)
@@ -681,9 +724,9 @@ func (r *Reader) SearchDocument(filename, query string) (string, error) {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	text, err := r.extractFull(safe, path)
@@ -743,9 +786,9 @@ func (r *Reader) GetDocumentSummary(filename string) (string, error) {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	if !isPDF(safe) {
@@ -775,11 +818,12 @@ func (r *Reader) GetDocumentMetadata(filename string) (*DocumentMetadata, error)
 		return nil, err
 	}
 
-	path := r.fullPath(safe)
-	fi, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return nil, err
 	}
+
+	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("cannot stat file: %w", err)
 	}
@@ -835,9 +879,9 @@ func (r *Reader) ExtractImages(filename string, page int) ([]ImageInfo, error) {
 		return nil, err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return nil, err
 	}
 
 	return r.extractImagesFromPath(path, page)
@@ -991,9 +1035,9 @@ func (r *Reader) ReadImage(filename string, language string) (string, error) {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("image not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	if _, err := exec.LookPath(r.tesseractBin); err != nil {
@@ -1037,9 +1081,9 @@ func (r *Reader) GetDocumentOutline(filename string) ([]OutlineEntry, error) {
 		return nil, err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return nil, err
 	}
 
 	ext := strings.ToLower(filepath.Ext(safe))
@@ -1224,9 +1268,9 @@ func (r *Reader) ExtractTables(filename string, page int) ([]TableData, error) {
 		return nil, err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return nil, err
 	}
 
 	ext := strings.ToLower(filepath.Ext(safe))
@@ -1480,9 +1524,9 @@ func (r *Reader) ConvertToMarkdown(filename string) (string, error) {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	ext := strings.ToLower(filepath.Ext(safe))

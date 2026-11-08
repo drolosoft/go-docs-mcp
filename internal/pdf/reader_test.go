@@ -1245,3 +1245,112 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// ---------------------------------------------------------------------------
+// 21. Confinement to the documents directory
+// ---------------------------------------------------------------------------
+
+// secretText is what the file outside the documents directory holds, so a
+// test can tell whether any tool leaked it.
+const secretText = "TOP SECRET: this file lives outside DOCS_MCP_DIR"
+
+// writeOutsideSecret creates a file in a directory that is not the documents
+// directory and returns its path.
+func writeOutsideSecret(t *testing.T, name string) string {
+	t.Helper()
+	outside := t.TempDir()
+	writeFile(t, outside, name, "# Heading\n\n"+secretText+"\n")
+	return filepath.Join(outside, name)
+}
+
+func TestDocuments_SymlinkOutsideDirIsRejected(t *testing.T) {
+	r, dir := newTestReader(t)
+
+	secret := writeOutsideSecret(t, "secret.md")
+	if err := os.Symlink(secret, filepath.Join(dir, "innocent.md")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.Symlink(secret, filepath.Join(dir, "innocent.png")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.Symlink(secret, filepath.Join(dir, "innocent.pdf")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	// Every tool that opens a document by name must refuse the outward link.
+	calls := map[string]func() (any, error){
+		"ReadDocument":        func() (any, error) { return r.ReadDocument("innocent.md", 0) },
+		"SearchDocument":      func() (any, error) { return r.SearchDocument("innocent.md", "SECRET") },
+		"GetDocumentSummary":  func() (any, error) { return r.GetDocumentSummary("innocent.md") },
+		"GetDocumentOutline":  func() (any, error) { return r.GetDocumentOutline("innocent.md") },
+		"ExtractTables":       func() (any, error) { return r.ExtractTables("innocent.md", 0) },
+		"ConvertToMarkdown":   func() (any, error) { return r.ConvertToMarkdown("innocent.md") },
+		"ReadImage":           func() (any, error) { return r.ReadImage("innocent.png", "eng") },
+		"ReadDocumentPages":   func() (any, error) { return r.ReadDocumentPages("innocent.pdf", "1") },
+		"GetDocumentMetadata": func() (any, error) { return r.GetDocumentMetadata("innocent.pdf") },
+		"ExtractImages":       func() (any, error) { return r.ExtractImages("innocent.pdf", 0) },
+		"OCRDocument":         func() (any, error) { return r.OCRDocument("innocent.pdf", 1, "eng") },
+	}
+
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			result, err := call()
+			if err == nil {
+				t.Fatalf("%s followed a symlink out of the documents directory: %v", name, result)
+			}
+			if strings.Contains(fmt.Sprint(result), "TOP SECRET") {
+				t.Errorf("%s leaked the outside file: %v", name, result)
+			}
+			if !strings.Contains(err.Error(), "outside the documents directory") {
+				t.Errorf("%s: want an 'outside the documents directory' error, got %v", name, err)
+			}
+		})
+	}
+}
+
+func TestDocuments_SymlinkInsideDirStillWorks(t *testing.T) {
+	r, dir := newTestReader(t)
+
+	writeFile(t, dir, "real.txt", "inside content")
+	if err := os.Symlink("real.txt", filepath.Join(dir, "alias.txt")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	got, err := r.ReadDocument("alias.txt", 0)
+	if err != nil {
+		t.Fatalf("ReadDocument(alias.txt): %v", err)
+	}
+	if got != "inside content" {
+		t.Errorf("ReadDocument(alias.txt) = %q, want %q", got, "inside content")
+	}
+}
+
+func TestListDocuments_OmitsSymlinksThatLeaveTheDir(t *testing.T) {
+	r, dir := newTestReader(t)
+
+	writeFile(t, dir, "real.txt", "inside content")
+	if err := os.Symlink("real.txt", filepath.Join(dir, "alias.txt")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.Symlink(writeOutsideSecret(t, "secret.txt"), filepath.Join(dir, "innocent.txt")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "gone.txt"), filepath.Join(dir, "dangling.txt")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	docs, err := r.ListDocuments()
+	if err != nil {
+		t.Fatalf("ListDocuments() with a dangling symlink must not fail: %v", err)
+	}
+
+	var names []string
+	for _, doc := range docs {
+		names = append(names, doc.Filename)
+	}
+	listed := strings.Join(names, ",")
+
+	if listed != "alias.txt,real.txt" {
+		t.Errorf("ListDocuments() = %s, want alias.txt,real.txt (no outward or dangling links)", listed)
+	}
+}
