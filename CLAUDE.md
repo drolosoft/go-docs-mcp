@@ -20,13 +20,13 @@ DOCS_MCP_DIR=~/docs ./go-docs-mcp   # custom dir
 ## Key Decisions
 
 - Uses `pdftotext -layout` for text extraction (preserves formatting)
-- mtime-based cache: re-extracts only when file changes; bounded by `DOCS_MCP_CACHE_MB` (default 256) with LRU eviction; summary, outline and tables share it
+- mtime-based cache: re-extracts only when file changes; bounded by `DOCS_MCP_CACHE_MB` (default 256, 0 disables) with LRU eviction, a text larger than the cap is not cached; summary, outline and tables share it
 - Confinement: `filepath.Base()` + extension allowlist, then `filepath.EvalSymlinks` of the file must stay under the resolved `DOCS_MCP_DIR` (symlinks out are rejected and not listed)
 - Every external process runs with `exec.CommandContext` and a per-operation deadline; page ranges are capped at 200 and checked against the real page count
 - Tools are registered with read-only / non-destructive / idempotent annotations; only `read_url` is open-world, and `DOCS_MCP_DISABLE_URL=1` removes it
 - Page tracking uses form feed (`\f`) characters from pdftotext output
 - Homebrew path detection for macOS (`/opt/homebrew/bin/`)
-- Env vars: `DOCS_MCP_DIR` (primary), `PDF_MCP_DIR` (backward compat), `DROLO_DOCS_DIR` (legacy), `DOCS_MCP_OCR_LANG` (tesseract language, default `eng`), `DOCS_MCP_DISABLE_URL`
+- Env vars: `DOCS_MCP_DIR` (primary), `PDF_MCP_DIR` (backward compat), `DROLO_DOCS_DIR` (legacy), `DOCS_MCP_OCR_LANG` (tesseract language, default `eng`), `DOCS_MCP_DISABLE_URL`, `DOCS_MCP_CACHE_MB` (text cache cap)
 - Default directory: `~/.docs-mcp/documents/`
 - Text tools page their output: `offset` + `max_chars` (default 50000, cap 200000) with a trailer naming the next offset; `search_document` has `max_results`; `extract_images` returns PNG image content, skips masks, scales to 1600 px, 8 MB budget
 - Structured output (`outputSchema` + `structuredContent`) on list_documents, list_formats, get_document_metadata, get_document_outline, extract_tables; text JSON kept for old clients

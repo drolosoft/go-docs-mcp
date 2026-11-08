@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"encoding/base64"
 	"encoding/csv"
@@ -56,9 +57,106 @@ type ImageInfo struct {
 }
 
 // cacheEntry stores extracted text with its modification time for invalidation.
+// It keeps its own filename so an evicted list element can be removed from the
+// map without searching it.
 type cacheEntry struct {
-	text  string
-	mtime time.Time
+	filename string
+	text     string
+	mtime    time.Time
+}
+
+// defaultCacheMegabytes is the text cache cap when DOCS_MCP_CACHE_MB is not
+// set. Extracted text is a few hundred kilobytes for a long report, so 256 MB
+// keeps hundreds of documents warm without letting a library of scanned books
+// take the machine's memory.
+const defaultCacheMegabytes = 256
+
+// cacheLimit returns the text cache cap in bytes from DOCS_MCP_CACHE_MB. Zero
+// turns the cache off; an empty, negative or unreadable value falls back to
+// defaultCacheMegabytes, because a typo must not disable the cache silently or
+// make it unbounded.
+func cacheLimit() int64 {
+	megabytes, err := strconv.ParseInt(strings.TrimSpace(os.Getenv("DOCS_MCP_CACHE_MB")), 10, 64)
+	if err != nil || megabytes < 0 {
+		megabytes = defaultCacheMegabytes
+	}
+
+	return megabytes << 20
+}
+
+// textCache keeps extracted text in memory up to limit bytes and evicts the
+// least recently used document first. The size counts the text alone: the
+// key and the bookkeeping are small next to a document.
+type textCache struct {
+	mu      sync.Mutex
+	limit   int64
+	size    int64
+	order   *list.List
+	entries map[string]*list.Element
+}
+
+// newTextCache returns an empty cache that holds at most limit bytes of text.
+func newTextCache(limit int64) *textCache {
+	return &textCache{
+		limit:   limit,
+		order:   list.New(),
+		entries: make(map[string]*list.Element),
+	}
+}
+
+// get returns the cached text of filename when it was extracted from the
+// version with mtime, and marks it as the most recently used.
+func (c *textCache) get(filename string, mtime time.Time) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	element, ok := c.entries[filename]
+	if !ok {
+		return "", false
+	}
+
+	entry := element.Value.(*cacheEntry)
+	if !entry.mtime.Equal(mtime) {
+		return "", false
+	}
+
+	c.order.MoveToFront(element)
+
+	return entry.text, true
+}
+
+// put stores text for filename at mtime, replacing an older version, and
+// evicts the least recently used documents until the cache fits its limit.
+// A text larger than the whole limit is not stored, so one huge document
+// cannot empty the cache for nothing.
+func (c *textCache) put(filename string, mtime time.Time, text string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	textSize := int64(len(text))
+	if textSize > c.limit {
+		return
+	}
+
+	if element, ok := c.entries[filename]; ok {
+		c.remove(element)
+	}
+
+	entry := &cacheEntry{filename: filename, text: text, mtime: mtime}
+	c.entries[filename] = c.order.PushFront(entry)
+	c.size += textSize
+
+	for c.size > c.limit {
+		c.remove(c.order.Back())
+	}
+}
+
+// remove drops element from the list, the map and the size. The caller holds
+// the lock.
+func (c *textCache) remove(element *list.Element) {
+	entry := c.order.Remove(element).(*cacheEntry)
+	delete(c.entries, entry.filename)
+	c.size -= int64(len(entry.text))
 }
 
 // Reader handles PDF text extraction via pdftotext with in-memory caching.
@@ -73,8 +171,9 @@ type Reader struct {
 	pandocBin    string
 	hasOCR       bool // true if both pdftoppm and tesseract are available
 
-	mu    sync.RWMutex
-	cache map[string]*cacheEntry
+	// cache holds the full text of documents already read, keyed by file
+	// name, within the DOCS_MCP_CACHE_MB cap.
+	cache *textCache
 }
 
 // toolTimeout bounds one run of pdftotext, pdfinfo, pdfimages or pandoc. A
@@ -202,7 +301,7 @@ func NewReader(docsDir string) *Reader {
 		tesseractBin: tesseractBin,
 		pandocBin:    pandocBin,
 		hasOCR:       hasOCR,
-		cache:        make(map[string]*cacheEntry),
+		cache:        newTextCache(cacheLimit()),
 	}
 }
 
@@ -749,12 +848,9 @@ func (r *Reader) extractFull(ctx context.Context, filename, path string) (string
 	mtime := info.ModTime()
 
 	// Check cache
-	r.mu.RLock()
-	if entry, ok := r.cache[filename]; ok && entry.mtime.Equal(mtime) {
-		r.mu.RUnlock()
-		return entry.text, nil
+	if text, ok := r.cache.get(filename, mtime); ok {
+		return text, nil
 	}
-	r.mu.RUnlock()
 
 	// Extract by format (text verbatim, docx via pandoc, PDF via pdftotext + OCR fallback)
 	text, err := r.extractText(ctx, filename, path)
@@ -763,9 +859,7 @@ func (r *Reader) extractFull(ctx context.Context, filename, path string) (string
 	}
 
 	// Update cache
-	r.mu.Lock()
-	r.cache[filename] = &cacheEntry{text: text, mtime: mtime}
-	r.mu.Unlock()
+	r.cache.put(filename, mtime, text)
 
 	return text, nil
 }

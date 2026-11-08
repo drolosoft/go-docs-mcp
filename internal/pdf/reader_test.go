@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -2400,5 +2401,148 @@ func TestExtractTables_ScannedPageFallsBackToOCR(t *testing.T) {
 	}
 	if len(tables) != 1 || len(tables[0].Rows) != 3 || tables[0].Page != 2 {
 		t.Errorf("want the recognised three-row table on page 2, got %+v", tables)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bounded text cache
+// ---------------------------------------------------------------------------
+
+func TestTextCache_EvictsTheLeastRecentlyUsedOverTheCap(t *testing.T) {
+	cache := newTextCache(1 << 20)
+	mtime := time.Now()
+	halfMegabyte := strings.Repeat("x", 512<<10)
+
+	cache.put("a.pdf", mtime, halfMegabyte)
+	cache.put("b.pdf", mtime, halfMegabyte)
+
+	// Reading a makes b the least recently used, so c pushes b out.
+	if _, ok := cache.get("a.pdf", mtime); !ok {
+		t.Fatal("a.pdf should still be cached before the cap is reached")
+	}
+	cache.put("c.pdf", mtime, halfMegabyte)
+
+	if _, ok := cache.get("b.pdf", mtime); ok {
+		t.Error("b.pdf was the least recently used and should have been evicted")
+	}
+	for _, name := range []string{"a.pdf", "c.pdf"} {
+		if _, ok := cache.get(name, mtime); !ok {
+			t.Errorf("%s is one of the two most recently used and should be cached", name)
+		}
+	}
+	if cache.size != 1<<20 {
+		t.Errorf("cache size = %d bytes, want %d", cache.size, 1<<20)
+	}
+}
+
+func TestTextCache_KeepsTheTwoNewestOfThreeInserts(t *testing.T) {
+	cache := newTextCache(1 << 20)
+	mtime := time.Now()
+	halfMegabyte := strings.Repeat("x", 512<<10)
+
+	for _, name := range []string{"a.pdf", "b.pdf", "c.pdf"} {
+		cache.put(name, mtime, halfMegabyte)
+	}
+
+	if _, ok := cache.get("a.pdf", mtime); ok {
+		t.Error("a.pdf was inserted first and should have been evicted")
+	}
+	for _, name := range []string{"b.pdf", "c.pdf"} {
+		if _, ok := cache.get(name, mtime); !ok {
+			t.Errorf("%s should be cached", name)
+		}
+	}
+}
+
+func TestTextCache_DoesNotStoreATextLargerThanTheCap(t *testing.T) {
+	cache := newTextCache(1 << 20)
+	mtime := time.Now()
+
+	cache.put("small.pdf", mtime, "small")
+	cache.put("huge.pdf", mtime, strings.Repeat("x", 2<<20))
+
+	if _, ok := cache.get("huge.pdf", mtime); ok {
+		t.Error("a text larger than the whole cap must not be cached")
+	}
+	if _, ok := cache.get("small.pdf", mtime); !ok {
+		t.Error("an oversized text must not evict what is already cached")
+	}
+}
+
+func TestTextCache_ReplacingAnEntryKeepsTheSizeRight(t *testing.T) {
+	cache := newTextCache(1 << 20)
+	first := time.Now()
+	second := first.Add(time.Second)
+
+	cache.put("notes.md", first, "version one")
+	cache.put("notes.md", second, "v2")
+
+	if _, ok := cache.get("notes.md", first); ok {
+		t.Error("an entry for an older mtime must not be served")
+	}
+	if text, ok := cache.get("notes.md", second); !ok || text != "v2" {
+		t.Errorf("get(notes.md) = %q, %v; want v2, true", text, ok)
+	}
+	if cache.size != int64(len("v2")) {
+		t.Errorf("cache size = %d, want %d", cache.size, len("v2"))
+	}
+}
+
+func TestTextCache_ZeroCapCachesNothing(t *testing.T) {
+	cache := newTextCache(0)
+	mtime := time.Now()
+
+	cache.put("notes.md", mtime, "text")
+
+	if _, ok := cache.get("notes.md", mtime); ok {
+		t.Error("a zero cap disables the cache")
+	}
+}
+
+func TestCacheLimit_ReadsTheEnvironment(t *testing.T) {
+	cases := []struct {
+		value string
+		want  int64
+	}{
+		{"", defaultCacheMegabytes << 20},
+		{"64", 64 << 20},
+		{"0", 0},
+		{"-5", defaultCacheMegabytes << 20},
+		{"lots", defaultCacheMegabytes << 20},
+	}
+
+	for _, testCase := range cases {
+		t.Setenv("DOCS_MCP_CACHE_MB", testCase.value)
+
+		if got := cacheLimit(); got != testCase.want {
+			t.Errorf("DOCS_MCP_CACHE_MB=%q: cacheLimit() = %d, want %d", testCase.value, got, testCase.want)
+		}
+	}
+}
+
+func TestTextCache_ConcurrentReadersAndWritersKeepTheCap(t *testing.T) {
+	cache := newTextCache(64 << 10)
+	mtime := time.Now()
+	text := strings.Repeat("x", 10<<10)
+
+	// Twenty goroutines read and write overlapping names; the race detector
+	// checks the locking and the size must still respect the cap at the end.
+	var group sync.WaitGroup
+	for worker := range 20 {
+		group.Go(func() {
+			for round := range 50 {
+				name := fmt.Sprintf("doc-%d.pdf", (worker+round)%12)
+				cache.put(name, mtime, text)
+				cache.get(name, mtime)
+			}
+		})
+	}
+	group.Wait()
+
+	if cache.size > cache.limit {
+		t.Errorf("cache size %d is over its limit %d", cache.size, cache.limit)
+	}
+	if cache.size != int64(cache.order.Len())*int64(len(text)) {
+		t.Errorf("cache size %d does not match its %d entries", cache.size, cache.order.Len())
 	}
 }
