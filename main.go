@@ -115,14 +115,17 @@ func main() {
 
 // newServer builds the MCP server with every tool registered over reader.
 // main serves it on stdio; tests call it directly to inspect the tools.
-// docsDir is the documents directory the reader was created with.
-func newServer(reader *pdf.Reader, docsDir string) *server.MCPServer {
-	s := server.NewMCPServer(
-		"go-docs-mcp",
-		serverVersion(),
+// docsDir is the documents directory the reader was created with, and extra
+// options are appended to the server's own, which lets a test switch on
+// checks such as output schema validation.
+func newServer(reader *pdf.Reader, docsDir string, extra ...server.ServerOption) *server.MCPServer {
+	options := []server.ServerOption{
 		server.WithToolCapabilities(true),
 		server.WithToolHandlerMiddleware(redactPathsMiddleware(docsDir, os.TempDir())),
-	)
+	}
+	options = append(options, extra...)
+
+	s := server.NewMCPServer("go-docs-mcp", serverVersion(), options...)
 
 	// Register tools (13 total, 12 when read_url is disabled)
 	registerListDocuments(s, reader)
@@ -231,11 +234,59 @@ func redactPaths(message string, roots ...string) string {
 	return message
 }
 
+// documentList is the structured answer of list_documents. MCP wants
+// structuredContent to be a JSON object, so the list the text block prints
+// bare travels here under a name.
+type documentList struct {
+	Documents []pdf.DocumentInfo `json:"documents"`
+}
+
+// formatList is the structured answer of list_formats, the same object its
+// text block has always printed.
+type formatList struct {
+	Formats []pdf.FormatInfo `json:"formats"`
+}
+
+// documentOutline is the structured answer of get_document_outline.
+type documentOutline struct {
+	Outline []pdf.OutlineEntry `json:"outline"`
+}
+
+// documentTables is the structured answer of extract_tables.
+type documentTables struct {
+	Tables []pdf.TableData `json:"tables"`
+}
+
+// structuredResult answers a tool call with structured as structuredContent
+// and printed as the text block. printed is the JSON the tool returned before
+// it had an output schema, so clients that only read text see no change.
+func structuredResult(structured, printed any) *mcp.CallToolResult {
+	data, err := json.MarshalIndent(printed, "", "  ")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Error marshaling results: %v", err))
+	}
+
+	return mcp.NewToolResultStructured(structured, string(data))
+}
+
+// nonNil returns items, or an empty slice when items is nil, so a
+// structured list reaches the client as [] and not as null.
+func nonNil[Item any](items []Item) []Item {
+	if items == nil {
+		return []Item{}
+	}
+
+	return items
+}
+
+// registerListDocuments adds list_documents, which lists the readable files
+// of the documents directory.
 func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("list_documents",
 		mcp.WithDescription("List all documents in the configured directory with format detection and metadata (filename, pages, size). Use this to discover available documents before reading or searching. Read-only."),
 		mcp.WithTitleAnnotation("List Documents"),
 		readOnlyHints(false),
+		mcp.WithOutputSchema[documentList](),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -244,12 +295,9 @@ func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error listing documents: %v", err)), nil
 		}
 
-		data, err := json.MarshalIndent(docs, "", "  ")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling results: %v", err)), nil
-		}
+		structured := documentList{Documents: nonNil(docs)}
 
-		return mcp.NewToolResultText(string(data)), nil
+		return structuredResult(structured, docs), nil
 	})
 }
 
@@ -357,11 +405,14 @@ func registerGetDocumentSummary(s *server.MCPServer, reader *pdf.Reader) {
 	})
 }
 
+// registerGetDocumentMetadata adds get_document_metadata, which reports a
+// document's properties as pdfinfo sees them.
 func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("get_document_metadata",
 		mcp.WithDescription("Get document metadata including title, author, dates, page count, and file size. Use this when you need document properties without reading its content; returns full PDF-specific fields (subject, creator, producer, version) for PDF files. Read-only."),
 		mcp.WithTitleAnnotation("Get Document Metadata"),
 		readOnlyHints(false),
+		mcp.WithOutputSchema[pdf.DocumentMetadata](),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to get metadata for"),
@@ -379,12 +430,7 @@ func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error getting metadata: %v", err)), nil
 		}
 
-		data, err := json.MarshalIndent(metadata, "", "  ")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling metadata: %v", err)), nil
-		}
-
-		return mcp.NewToolResultText(string(data)), nil
+		return structuredResult(metadata, metadata), nil
 	})
 }
 
@@ -769,26 +815,20 @@ func isNonPublicAddress(address netip.Addr) bool {
 	return false
 }
 
+// registerListFormats adds list_formats, which says which formats can be
+// read on this machine and what each one needs installed.
 func registerListFormats(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("list_formats",
 		mcp.WithDescription("Show all supported document formats and their dependency installation status. Use this to check which formats are available and diagnose missing dependencies. Read-only."),
 		mcp.WithTitleAnnotation("List Formats"),
 		readOnlyHints(false),
+		mcp.WithOutputSchema[formatList](),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		formats := reader.ListFormats()
+		formats := formatList{Formats: nonNil(reader.ListFormats())}
 
-		result := map[string]interface{}{
-			"formats": formats,
-		}
-
-		data, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling results: %v", err)), nil
-		}
-
-		return mcp.NewToolResultText(string(data)), nil
+		return structuredResult(formats, formats), nil
 	})
 }
 
@@ -829,11 +869,14 @@ func registerReadImage(s *server.MCPServer, reader *pdf.Reader) {
 	})
 }
 
+// registerGetDocumentOutline adds get_document_outline, which lists the
+// headings of a document with their level and page.
 func registerGetDocumentOutline(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("get_document_outline",
 		mcp.WithDescription("Extract the heading structure and table of contents from a document. Use this to understand document organization before reading specific sections; detects numbered sections, ALL-CAPS headings, and markdown # headings. Read-only."),
 		mcp.WithTitleAnnotation("Get Document Outline"),
 		readOnlyHints(false),
+		mcp.WithOutputSchema[documentOutline](),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to extract outline from"),
@@ -851,24 +894,22 @@ func registerGetDocumentOutline(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error extracting outline: %v", err)), nil
 		}
 
-		if len(outline) == 0 {
-			return mcp.NewToolResultText("[]"), nil
-		}
+		// An empty outline has always printed "[]"; nonNil keeps it that way
+		// in the text and in the structured content alike.
+		entries := nonNil(outline)
 
-		data, err := json.MarshalIndent(outline, "", "  ")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling outline: %v", err)), nil
-		}
-
-		return mcp.NewToolResultText(string(data)), nil
+		return structuredResult(documentOutline{Outline: entries}, entries), nil
 	})
 }
 
+// registerExtractTables adds extract_tables, which finds rows and columns in
+// a document's text.
 func registerExtractTables(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("extract_tables",
 		mcp.WithDescription("Extract table-like structures from a document, detecting pipe-delimited, tab-delimited, and multi-space-delimited columns. Use this when you need structured tabular data from a PDF, CSV, or text file. Read-only."),
 		mcp.WithTitleAnnotation("Extract Tables"),
 		readOnlyHints(false),
+		mcp.WithOutputSchema[documentTables](),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to extract tables from"),
@@ -891,16 +932,11 @@ func registerExtractTables(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error extracting tables: %v", err)), nil
 		}
 
-		if len(tables) == 0 {
-			return mcp.NewToolResultText("[]"), nil
-		}
+		// An empty result has always printed "[]"; nonNil keeps it that way
+		// in the text and in the structured content alike.
+		found := nonNil(tables)
 
-		data, err := json.MarshalIndent(tables, "", "  ")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling tables: %v", err)), nil
-		}
-
-		return mcp.NewToolResultText(string(data)), nil
+		return structuredResult(documentTables{Tables: found}, found), nil
 	})
 }
 

@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,8 +24,9 @@ import (
 // listedTool is the part of a tools/list entry these tests look at, decoded
 // from the JSON a client receives so the wire names are checked too.
 type listedTool struct {
-	Name        string `json:"name"`
-	Annotations struct {
+	Name         string          `json:"name"`
+	OutputSchema json.RawMessage `json:"outputSchema"`
+	Annotations  struct {
 		Title           string `json:"title"`
 		ReadOnlyHint    *bool  `json:"readOnlyHint"`
 		DestructiveHint *bool  `json:"destructiveHint"`
@@ -415,4 +419,279 @@ func TestRedactPaths(t *testing.T) {
 			t.Errorf("redactPaths(%q)\n got %q\nwant %q", c.message, got, c.want)
 		}
 	}
+}
+
+// structuredTools are the tools whose answer is JSON, so they also return it
+// as structuredContent and describe its shape in an outputSchema.
+var structuredTools = []string{
+	"list_documents",
+	"list_formats",
+	"get_document_metadata",
+	"get_document_outline",
+	"extract_tables",
+}
+
+func TestStructuredToolsAdvertiseOutputSchema(t *testing.T) {
+	mcpServer, _ := newTestServer(t)
+
+	tools := listTools(t, mcpServer)
+
+	for _, tool := range tools {
+		wantSchema := slices.Contains(structuredTools, tool.Name)
+
+		if !wantSchema {
+			if len(tool.OutputSchema) > 0 {
+				t.Errorf("%s: unexpected outputSchema %s", tool.Name, tool.OutputSchema)
+			}
+			continue
+		}
+
+		var schema struct {
+			Type       string                     `json:"type"`
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.Unmarshal(tool.OutputSchema, &schema); err != nil {
+			t.Errorf("%s: outputSchema does not decode: %v (%s)", tool.Name, err, tool.OutputSchema)
+			continue
+		}
+
+		// MCP requires structuredContent to be a JSON object, so the schema
+		// must describe one even for the tools whose text answer is a list.
+		if schema.Type != "object" || len(schema.Properties) == 0 {
+			t.Errorf("%s: outputSchema is not an object with properties: %s", tool.Name, tool.OutputSchema)
+		}
+	}
+}
+
+// callResult is the part of a tools/call result the structured output tests
+// look at.
+type callResult struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	StructuredContent json.RawMessage `json:"structuredContent"`
+	IsError           bool            `json:"isError"`
+}
+
+// callTool sends one tools/call with the given arguments, as JSON, and
+// decodes its result.
+func callTool(t *testing.T, mcpServer *server.MCPServer, name, arguments string) callResult {
+	t.Helper()
+
+	message := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"` + name + `","arguments":` + arguments + `}}`
+	data := handle(t, mcpServer, message)
+
+	var envelope struct {
+		Result callResult `json:"result"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode tools/call %s: %v\n%s", name, err, data)
+	}
+
+	if envelope.Result.IsError || len(envelope.Result.Content) == 0 {
+		t.Fatalf("%s failed: %s", name, data)
+	}
+
+	return envelope.Result
+}
+
+// newStructuredServer builds a server that checks every structuredContent
+// against its tool's outputSchema, so a result that drifts from the schema
+// fails the call, over a directory with one document of each text kind.
+func newStructuredServer(t *testing.T) (*server.MCPServer, string) {
+	t.Helper()
+
+	docsDir := t.TempDir()
+	writeTestFile(t, docsDir, "notes.md", "# Notes\n\n## First part\n\nSome text.\n")
+	writeTestFile(t, docsDir, "data.csv", "name,size\nalpha,1\nbeta,2\n")
+
+	mcpServer := newServer(pdf.NewReader(docsDir), docsDir, server.WithOutputSchemaValidation())
+
+	return mcpServer, docsDir
+}
+
+// writeTestFile writes content to name inside dir and fails the test when it
+// cannot.
+func writeTestFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+// indentedJSON returns value the way the tools have always printed it, the
+// text an old client keeps reading.
+func indentedJSON(t *testing.T, value any) string {
+	t.Helper()
+
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	return string(data)
+}
+
+func TestListDocumentsReturnsStructuredContent(t *testing.T) {
+	mcpServer, docsDir := newStructuredServer(t)
+
+	result := callTool(t, mcpServer, "list_documents", `{}`)
+
+	var structured struct {
+		Documents []pdf.DocumentInfo `json:"documents"`
+	}
+	if err := json.Unmarshal(result.StructuredContent, &structured); err != nil {
+		t.Fatalf("structuredContent: %v (%s)", err, result.StructuredContent)
+	}
+	if len(structured.Documents) != 2 {
+		t.Fatalf("structuredContent lists %d documents, want 2: %s", len(structured.Documents), result.StructuredContent)
+	}
+
+	// The text block stays the bare array the tool printed before, so a
+	// client that ignores structuredContent sees no change.
+	documents, err := pdf.NewReader(docsDir).ListDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if want := indentedJSON(t, documents); result.Content[0].Text != want {
+		t.Errorf("text = %s, want %s", result.Content[0].Text, want)
+	}
+}
+
+func TestListFormatsReturnsStructuredContent(t *testing.T) {
+	mcpServer, docsDir := newStructuredServer(t)
+
+	result := callTool(t, mcpServer, "list_formats", `{}`)
+
+	formats := pdf.NewReader(docsDir).ListFormats()
+	want := indentedJSON(t, map[string]any{"formats": formats})
+
+	if result.Content[0].Text != want {
+		t.Errorf("text = %s, want %s", result.Content[0].Text, want)
+	}
+
+	var structured struct {
+		Formats []pdf.FormatInfo `json:"formats"`
+	}
+	if err := json.Unmarshal(result.StructuredContent, &structured); err != nil {
+		t.Fatalf("structuredContent: %v (%s)", err, result.StructuredContent)
+	}
+	if !slices.Equal(structured.Formats, formats) {
+		t.Errorf("structured formats = %+v, want %+v", structured.Formats, formats)
+	}
+}
+
+func TestGetDocumentOutlineReturnsStructuredContent(t *testing.T) {
+	mcpServer, _ := newStructuredServer(t)
+
+	result := callTool(t, mcpServer, "get_document_outline", `{"filename":"notes.md"}`)
+
+	var structured struct {
+		Outline []pdf.OutlineEntry `json:"outline"`
+	}
+	if err := json.Unmarshal(result.StructuredContent, &structured); err != nil {
+		t.Fatalf("structuredContent: %v (%s)", err, result.StructuredContent)
+	}
+	if len(structured.Outline) != 2 || structured.Outline[1].Title != "First part" {
+		t.Fatalf("structured outline = %+v", structured.Outline)
+	}
+
+	if want := indentedJSON(t, structured.Outline); result.Content[0].Text != want {
+		t.Errorf("text = %s, want %s", result.Content[0].Text, want)
+	}
+}
+
+func TestExtractTablesReturnsStructuredContent(t *testing.T) {
+	mcpServer, _ := newStructuredServer(t)
+
+	result := callTool(t, mcpServer, "extract_tables", `{"filename":"data.csv"}`)
+
+	var structured struct {
+		Tables []pdf.TableData `json:"tables"`
+	}
+	if err := json.Unmarshal(result.StructuredContent, &structured); err != nil {
+		t.Fatalf("structuredContent: %v (%s)", err, result.StructuredContent)
+	}
+	if len(structured.Tables) != 1 || len(structured.Tables[0].Rows) != 3 {
+		t.Fatalf("structured tables = %+v", structured.Tables)
+	}
+
+	if want := indentedJSON(t, structured.Tables); result.Content[0].Text != want {
+		t.Errorf("text = %s, want %s", result.Content[0].Text, want)
+	}
+}
+
+func TestEmptyResultsKeepTheirText(t *testing.T) {
+	mcpServer, docsDir := newStructuredServer(t)
+	writeTestFile(t, docsDir, "plain.txt", "no headings and no columns here\n")
+
+	outline := callTool(t, mcpServer, "get_document_outline", `{"filename":"plain.txt"}`)
+	tables := callTool(t, mcpServer, "extract_tables", `{"filename":"plain.txt"}`)
+
+	// An empty answer is still "[]" in the text and an empty list, never a
+	// null, in the structured content.
+	if outline.Content[0].Text != "[]" || string(outline.StructuredContent) != `{"outline":[]}` {
+		t.Errorf("empty outline: text %q, structured %s", outline.Content[0].Text, outline.StructuredContent)
+	}
+	if tables.Content[0].Text != "[]" || string(tables.StructuredContent) != `{"tables":[]}` {
+		t.Errorf("empty tables: text %q, structured %s", tables.Content[0].Text, tables.StructuredContent)
+	}
+}
+
+func TestGetDocumentMetadataReturnsStructuredContent(t *testing.T) {
+	mcpServer, docsDir := newStructuredServer(t)
+	if err := pdf.NewReader(docsDir).CheckDependencies(); err != nil {
+		t.Skipf("poppler is not installed: %v", err)
+	}
+	writeTestFile(t, docsDir, "fixture.pdf", string(onePagePDF("Contract fixture", "HELLO WORLD")))
+
+	result := callTool(t, mcpServer, "get_document_metadata", `{"filename":"fixture.pdf"}`)
+
+	var structured pdf.DocumentMetadata
+	if err := json.Unmarshal(result.StructuredContent, &structured); err != nil {
+		t.Fatalf("structuredContent: %v (%s)", err, result.StructuredContent)
+	}
+	if structured.Title != "Contract fixture" || structured.Pages != 1 {
+		t.Fatalf("structured metadata = %+v", structured)
+	}
+
+	if want := indentedJSON(t, structured); result.Content[0].Text != want {
+		t.Errorf("text = %s, want %s", result.Content[0].Text, want)
+	}
+}
+
+// onePagePDF builds the smallest valid PDF that poppler and tesseract can
+// read: one Letter page with text in 48pt Helvetica and title in its
+// document information. The cross-reference table needs the byte offset of
+// every object, so they are measured while the file is written.
+func onePagePDF(title, text string) []byte {
+	content := fmt.Sprintf("BT /F1 48 Tf 72 600 Td (%s) Tj ET", text)
+	objects := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+		fmt.Sprintf("<< /Title (%s) >>", title),
+	}
+
+	var document bytes.Buffer
+	document.WriteString("%PDF-1.4\n")
+
+	offsets := make([]int, len(objects))
+	for index, object := range objects {
+		offsets[index] = document.Len()
+		fmt.Fprintf(&document, "%d 0 obj\n%s\nendobj\n", index+1, object)
+	}
+
+	crossReference := document.Len()
+	fmt.Fprintf(&document, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for _, offset := range offsets {
+		fmt.Fprintf(&document, "%010d 00000 n \n", offset)
+	}
+	fmt.Fprintf(&document, "trailer\n<< /Size %d /Root 1 0 R /Info 6 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, crossReference)
+
+	return document.Bytes()
 }
