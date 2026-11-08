@@ -477,7 +477,7 @@ func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 			mcp.Description("Optional page number to OCR (1-based). If omitted, OCRs all pages."),
 		),
 		mcp.WithString("language",
-			mcp.Description("Tesseract language code (default: \"eng\"). Use \"spa\" for Spanish, \"fra\" for French, etc. Run 'tesseract --list-langs' to see available languages."),
+			mcp.Description("Tesseract language code (default: DOCS_MCP_OCR_LANG, or \"eng\"). Use \"spa\" for Spanish, \"fra\" for French, etc. Run 'tesseract --list-langs' to see available languages."),
 		),
 	)
 
@@ -492,7 +492,9 @@ func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 		}
 
 		page := request.GetInt("page", 0)
-		language := request.GetString("language", "eng")
+		// The reader falls back to DOCS_MCP_OCR_LANG and then "eng" when the
+		// call brings no language, so the default here must stay empty.
+		language := request.GetString("language", "")
 
 		text, err := reader.OCRDocument(ctx, filename, page, language)
 		if err != nil {
@@ -800,7 +802,7 @@ func registerReadImage(s *server.MCPServer, reader *pdf.Reader) {
 			mcp.Description("The image filename to OCR (must be in the documents directory)"),
 		),
 		mcp.WithString("language",
-			mcp.Description("Tesseract language code (default: \"eng\"). Use \"spa\" for Spanish, \"fra\" for French, etc."),
+			mcp.Description("Tesseract language code (default: DOCS_MCP_OCR_LANG, or \"eng\"). Use \"spa\" for Spanish, \"fra\" for French, etc."),
 		),
 	)
 
@@ -810,7 +812,9 @@ func registerReadImage(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError("filename parameter is required"), nil
 		}
 
-		language := request.GetString("language", "eng")
+		// The reader falls back to DOCS_MCP_OCR_LANG and then "eng" when the
+		// call brings no language, so the default here must stay empty.
+		language := request.GetString("language", "")
 
 		text, err := reader.ReadImage(ctx, filename, language)
 		if err != nil {
