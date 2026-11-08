@@ -35,6 +35,10 @@ parameters are optional and the structured results keep their text form.
   outline, search, then read by pages.
 - Progress notifications from `ocr_document` when the call carries a
   progress token.
+- `DOCS_MCP_URL_PROXY=1` lets `read_url` honour `HTTP_PROXY`/`HTTPS_PROXY`
+  again for installs behind a corporate proxy. v1.3.0 switched proxies off
+  so the connect-time address check sees the real target; with the opt-in
+  that check is dropped and only the DNS check on the target host remains.
 - `DOCS_MCP_CACHE_MB` (default 256, 0 turns it off): the text cache is
   bounded and evicts the least recently used document.
 - CI on GitHub Actions (gofmt, vet, race tests with poppler, tesseract and
