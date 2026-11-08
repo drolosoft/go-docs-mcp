@@ -3091,3 +3091,93 @@ func BenchmarkExtractImages_NoisyPhoto(b *testing.B) {
 		}
 	}
 }
+
+// pnmFile joins a hand-written PNM header and its raster into one file.
+func pnmFile(header string, raster ...byte) []byte {
+	return append([]byte(header), raster...)
+}
+
+func TestDecodePNM_ReadsColourGreyAndMonochrome(t *testing.T) {
+	// pdfimages never writes a comment, but the format allows one wherever
+	// whitespace goes in the header.
+	colour, err := decodePNM(bytes.NewReader(pnmFile("P6\n# written by hand\n2 1\n255\n", 255, 0, 0, 0, 0, 255)))
+	if err != nil {
+		t.Fatalf("P6: %v", err)
+	}
+	rgba, ok := colour.(*image.RGBA)
+	if !ok {
+		t.Fatalf("P6 must decode to *image.RGBA, got %T", colour)
+	}
+	if !slices.Equal(rgba.Pix, []uint8{255, 0, 0, 255, 0, 0, 255, 255}) {
+		t.Errorf("P6 pixels = %v, want red then blue, opaque", rgba.Pix)
+	}
+
+	// A maxval under 255 is stretched to the full byte range.
+	grey, err := decodePNM(bytes.NewReader(pnmFile("P5 3 1 15\n", 0, 15, 5)))
+	if err != nil {
+		t.Fatalf("P5: %v", err)
+	}
+	gray, ok := grey.(*image.Gray)
+	if !ok {
+		t.Fatalf("P5 must decode to *image.Gray, got %T", grey)
+	}
+	if !slices.Equal(gray.Pix, []uint8{0, 255, 85}) {
+		t.Errorf("P5 pixels = %v, want [0 255 85]", gray.Pix)
+	}
+
+	// Each PBM row is padded to a whole byte and a set bit is black: ten
+	// pixels take two bytes a row.
+	mono, err := decodePNM(bytes.NewReader(pnmFile("P4\n10 2\n", 0b10110000, 0b01000000, 0b11111111, 0b11000000)))
+	if err != nil {
+		t.Fatalf("P4: %v", err)
+	}
+	bits, ok := mono.(*image.Gray)
+	if !ok {
+		t.Fatalf("P4 must decode to *image.Gray, got %T", mono)
+	}
+	want := []uint8{
+		0, 255, 0, 0, 255, 255, 255, 255, 255, 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	}
+	if bits.Bounds().Dx() != 10 || bits.Bounds().Dy() != 2 || !slices.Equal(bits.Pix, want) {
+		t.Errorf("P4 = %v pixels %v, want 10x2 %v", bits.Bounds(), bits.Pix, want)
+	}
+}
+
+func TestDecodePNM_ReadsAGreyPPMAsGrey(t *testing.T) {
+	// pdfimages writes grey pictures as P6 too; keeping them grey keeps the
+	// PNG a third of the size, as it was when pdfimages wrote PNG.
+	decoded, err := decodePNM(bytes.NewReader(pnmFile("P6 2 1 255\n", 10, 10, 10, 200, 200, 200)))
+	if err != nil {
+		t.Fatalf("decodePNM: %v", err)
+	}
+
+	gray, ok := decoded.(*image.Gray)
+	if !ok {
+		t.Fatalf("a P6 with equal channels must decode to *image.Gray, got %T", decoded)
+	}
+	if !slices.Equal(gray.Pix, []uint8{10, 200}) {
+		t.Errorf("pixels = %v, want [10 200]", gray.Pix)
+	}
+}
+
+func TestDecodePNM_RejectsWhatItDoesNotRead(t *testing.T) {
+	cases := map[string][]byte{
+		"plain-text PPM":       pnmFile("P3\n1 1\n255\n0 0 0\n"),
+		"PAM":                  pnmFile("P7\nWIDTH 1\n"),
+		"not a PNM":            []byte("\x89PNG\r\n\x1a\n"),
+		"two bytes a sample":   pnmFile("P5 1 1 65535\n", 0, 0),
+		"zero width":           pnmFile("P5 0 1 255\n"),
+		"missing height":       pnmFile("P5 1"),
+		"short raster":         pnmFile("P6 2 2 255\n", 1, 2, 3),
+		"sample over maxval":   pnmFile("P5 1 1 15\n", 16),
+		"no space after value": pnmFile("P5 1 1 255x", 0),
+		"too large to decode":  pnmFile("P5 10000 10000 255\n"),
+	}
+
+	for name, data := range cases {
+		if decoded, err := decodePNM(bytes.NewReader(data)); err == nil {
+			t.Errorf("%s: decoded %v, want an error", name, decoded.Bounds())
+		}
+	}
+}
