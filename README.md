@@ -5,7 +5,7 @@
 <h1 align="center">Go-Docs MCP</h1>
 
 <p align="center">
-  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go&logoColor=white" alt="Go"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.27.3+-00ADD8?style=flat&logo=go&logoColor=white" alt="Go"></a>
   <a href="https://glama.ai/mcp/servers/drolosoft/go-docs-mcp"><img src="https://glama.ai/mcp/servers/drolosoft/go-docs-mcp/badges/score.svg" alt="go-docs-mcp MCP server"></a>
   <a href="https://github.com/drolosoft/go-docs-mcp/releases"><img src="https://img.shields.io/github/v/release/drolosoft/go-docs-mcp" alt="GitHub Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
@@ -38,7 +38,7 @@ Every other document MCP server handles **one format** — a PDF server for PDFs
 | Image & table extraction | **Yes** | Partial |
 | Document outline | **Yes** | Rare |
 | Fetch from URL | **Yes** | Rare |
-| Dir-locked, read-only | **Yes** | Varies |
+| Confined to one directory, read-only | **Yes** | Varies |
 | Smart caching | **Yes** | No |
 | Fully offline | **Yes** | Yes |
 
@@ -57,7 +57,7 @@ Go-Docs MCP reads them all from a single binary — fast, secure, and dependency
 | **Reading** | `get_document_summary` | First 3 pages as a quick overview |
 | **Search** | `search_document` | Case-insensitive full-text search with context |
 | **Analysis** | `get_document_metadata` | Title, author, dates, version, page count |
-| **Analysis** | `get_document_outline` | Table of contents / bookmarks |
+| **Analysis** | `get_document_outline` | Heading structure deduced from the text |
 | **Analysis** | `extract_tables` | Tables as structured data |
 | **Analysis** | `extract_images` | Images as base64 (max 10 per call) |
 | **OCR** | `ocr_document` | Force OCR on scanned/image-based PDFs |
@@ -87,7 +87,7 @@ Go-Docs MCP reads them all from a single binary — fast, secure, and dependency
 
 ## 📦 Prerequisites
 
-- **Go 1.25+** ([install](https://go.dev/doc/install))
+- **Go 1.27.3+** ([install](https://go.dev/doc/install))
 - **poppler** — required for PDF support
 - **tesseract** _(optional)_ — enables OCR for scanned docs and images
 - **pandoc** _(optional)_ — enables DOCX support
@@ -149,7 +149,13 @@ Place your documents in the directory and the server finds them automatically. A
 
 ### With Claude Code
 
-Add to your `.claude/settings.json`:
+Register the server from the terminal:
+
+```bash
+claude mcp add docs -e DOCS_MCP_DIR=/path/to/your/documents -- go-docs-mcp
+```
+
+Or add it to the `.mcp.json` of the project you want it in:
 
 ```json
 {
@@ -204,15 +210,14 @@ Lists all documents in the configured directory with format detection.
 [
   {
     "filename": "architecture-guide.pdf",
-    "format": "pdf",
     "title": "architecture-guide",
     "pages": 42,
     "size_bytes": 1048576
   },
   {
     "filename": "notes.md",
-    "format": "markdown",
     "title": "notes",
+    "pages": 0,
     "size_bytes": 4096
   }
 ]
@@ -315,7 +320,7 @@ Returns full document metadata.
 
 ### `get_document_outline`
 
-Extracts the document outline (table of contents / bookmarks) as a structured list.
+Extracts the heading structure of a document as a structured list. For PDFs the outline is deduced from the extracted text (short lines that look like headings), not read from the PDF bookmarks; for Markdown and text files it comes from `#` headings.
 
 **Parameters:**
 
@@ -367,7 +372,7 @@ Extracts images from a document as base64-encoded data. Returns up to 10 images 
 
 ### `read_url`
 
-Downloads a document from a URL and extracts its text content. Maximum file size: 50MB.
+Downloads a document from a URL and extracts its text content. Accepts `application/pdf` and `text/*` responses, up to 50MB. Set `DOCS_MCP_DISABLE_URL=1` to remove this tool entirely.
 
 **Parameters:**
 
@@ -434,11 +439,14 @@ Extracts text from an image file using OCR. Supports PNG, JPG, and TIFF. Require
 
 ## 🔒 Security
 
-- **Directory-locked** — only files within `DOCS_MCP_DIR` are accessible
-- **Path traversal prevention** — filenames sanitized; `../` rejected
-- **Extension filter** — only supported formats served
-- **Read-only** — no write operations
-- **URL downloads** — 50MB limit, Content-Type validated, temp files cleaned immediately
+- **Confined to one directory** — every file is resolved with its symlinks and must end up inside `DOCS_MCP_DIR`. A symlink that points outside is not listed and cannot be read. Filenames with path separators or `../` are rejected before that.
+- **Extension filter** — only supported formats are served.
+- **Read-only** — the server never writes inside `DOCS_MCP_DIR`, and every tool is announced to clients as read-only, non-destructive and idempotent.
+- **Timeouts on every external process** — poppler, tesseract and pandoc run under a context deadline (60 s per extraction, 120 s per OCR page, 10 min per OCR call) and are killed when it passes. Page ranges are checked against the real page count and capped at 200 pages per call.
+- **`read_url`** — 60 s timeout, 50MB limit, `application/pdf` or `text/*` only, temp files removed right after reading. Hosts that resolve to private, loopback, link-local or cloud metadata addresses are refused, on the first request and on every redirect. Set `DOCS_MCP_DISABLE_URL=1` to drop the tool from the server if your documents may contain untrusted instructions.
+- **Error messages** carry file names, never absolute paths of the host.
+
+How to report a problem is in [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -454,7 +462,7 @@ make clean     # Remove build artifacts
 
 ```
 go-docs-mcp/
-  main.go              # MCP server setup, 12 tool registrations
+  main.go              # MCP server setup, 13 tool registrations
   internal/
     pdf/
       reader.go        # Document extraction, caching, search, metadata, images, OCR

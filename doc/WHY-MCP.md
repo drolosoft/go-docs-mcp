@@ -34,7 +34,7 @@ The community benefits. Contributors appear. The tool improves faster than anyth
 
 ---
 
-## 🧰 12 Tools for Free
+## 🧰 13 Tools for Free
 
 The MCP server encapsulates complexity behind clean tool interfaces:
 
@@ -46,6 +46,7 @@ The MCP server encapsulates complexity behind clean tool interfaces:
 - Image extraction (base64)
 - URL fetching
 - Table extraction
+- Markdown conversion
 
 All of this is available to any client with **zero integration work**. A direct tool would need to reimplement every capability per project.
 
@@ -61,7 +62,7 @@ Each client gets this for free. No per-client caching logic required.
 
 ## 🔒 Security Boundary
 
-The server only serves files from a single configured directory. Path traversal is blocked at the binary level. Symlink escapes are rejected.
+The server only serves files from a single configured directory. Path traversal is blocked at the binary level, and every file is resolved through its symlinks before it is opened, so a link that points outside the directory is rejected. External processes run under deadlines, and every tool is announced as read-only.
 
 Every client gets the same security guarantee without implementing their own filesystem sandboxing.
 
