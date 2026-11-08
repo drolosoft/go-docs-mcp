@@ -297,6 +297,9 @@ func deflate(t *testing.T, data []byte) []byte {
 
 func TestExtractImages_ReturnsPNGImageContentWithoutTheMask(t *testing.T) {
 	mcpServer, docsDir := newTestServer(t)
+	if err := pdf.NewReader(docsDir).CheckDependencies(); err != nil {
+		t.Skipf("poppler is not installed: %v", err)
+	}
 	writeMaskedImagePDF(t, filepath.Join(docsDir, "figure.pdf"), 2048, 1024)
 
 	result := callToolMayFail(t, mcpServer, "extract_images", map[string]any{"filename": "figure.pdf"})

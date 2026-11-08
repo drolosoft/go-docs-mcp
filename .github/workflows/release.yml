@@ -25,6 +25,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # The same tools CI installs, so the tests before a release run the
+      # real poppler, tesseract and pandoc paths instead of skipping them.
+      - name: Install poppler, tesseract and pandoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            poppler-utils tesseract-ocr tesseract-ocr-eng
+          curl -fsSL -o /tmp/pandoc.deb \
+            https://github.com/jgm/pandoc/releases/download/3.10.2/pandoc-3.10.2-1-amd64.deb
+          sudo dpkg -i /tmp/pandoc.deb
+
       - name: Test
         run: go test -race ./...
 
