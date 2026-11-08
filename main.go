@@ -54,6 +54,15 @@ var nonPublicPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("100.64.0.0/10"),
 }
 
+// serverInstructions tell a model, at initialize, the order that keeps a
+// long document out of its context until it knows which part it needs.
+// offset and max_chars are read_document's way to slice a text with no
+// pages, such as a long Markdown file.
+const serverInstructions = "Start with list_documents to see which files exist, then call get_document_outline to learn how a document is organised before reading it. " +
+	"Use search_document to find the pages that answer the question, and read_document with page or pages to read only those instead of the whole file. " +
+	"For long text without pages, read_document takes offset and max_chars to read it in slices. " +
+	"Every document is also a docs://{filename} resource with the same text."
+
 func main() {
 	// Determine documents directory: DOCS_MCP_DIR (primary), PDF_MCP_DIR (backward compat), DROLO_DOCS_DIR (legacy)
 	docsDir := os.Getenv("DOCS_MCP_DIR")
@@ -128,6 +137,7 @@ func newServer(reader *pdf.Reader, docsDir string, extra ...server.ServerOption)
 		server.WithToolHandlerMiddleware(redactPathsMiddleware(docsDir, os.TempDir())),
 		server.WithResourceCapabilities(false, false),
 		server.WithHooks(hooks),
+		server.WithInstructions(serverInstructions),
 	}
 	options = append(options, extra...)
 

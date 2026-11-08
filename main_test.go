@@ -850,3 +850,37 @@ func TestReadResourceOutsideTheDirectoryFails(t *testing.T) {
 		}
 	}
 }
+
+func TestInitializeCarriesInstructions(t *testing.T) {
+	mcpServer, _ := newTestServer(t)
+
+	data := handle(t, mcpServer, `{"jsonrpc":"2.0","id":7,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`)
+
+	var envelope struct {
+		Result struct {
+			Instructions string `json:"instructions"`
+			Capabilities struct {
+				Resources *struct{} `json:"resources"`
+			} `json:"capabilities"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode initialize: %v\n%s", err, data)
+	}
+
+	if envelope.Result.Capabilities.Resources == nil {
+		t.Errorf("initialize does not declare resources: %s", data)
+	}
+
+	// The instructions name the tools in the order a model should reach for
+	// them, so each one must appear after the one before.
+	instructions := envelope.Result.Instructions
+	previous := -1
+	for _, name := range []string{"list_documents", "get_document_outline", "search_document", "read_document"} {
+		position := strings.Index(instructions, name)
+		if position <= previous {
+			t.Fatalf("instructions do not name %s in order: %q", name, instructions)
+		}
+		previous = position
+	}
+}
