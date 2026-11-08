@@ -13,6 +13,9 @@ func serverVersion() string {
 	return versionFrom(debug.ReadBuildInfo())
 }
 
+// versionFrom turns the result of debug.ReadBuildInfo into the version we
+// report, with the leading "v" removed. It takes the build info as arguments
+// so the tests can feed it every case without building a binary.
 func versionFrom(info *debug.BuildInfo, ok bool) string {
 	if !ok || info == nil {
 		return "dev"
