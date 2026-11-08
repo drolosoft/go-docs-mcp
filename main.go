@@ -68,7 +68,19 @@ func main() {
 		log.Printf("OCR support disabled (install tesseract and poppler for OCR)")
 	}
 
-	// Create MCP server
+	s := newServer(reader, docsDir)
+
+	// Run stdio transport
+	stdio := server.NewStdioServer(s)
+	if err := stdio.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
+		log.Fatalf("server error: %v", err)
+	}
+}
+
+// newServer builds the MCP server with every tool registered over reader.
+// main serves it on stdio; tests call it directly to inspect the tools.
+// docsDir is the documents directory the reader was created with.
+func newServer(reader *pdf.Reader, docsDir string) *server.MCPServer {
 	s := server.NewMCPServer(
 		"go-docs-mcp",
 		serverVersion(),
@@ -90,16 +102,28 @@ func main() {
 	registerExtractTables(s, reader)
 	registerConvertToMarkdown(s, reader)
 
-	// Run stdio transport
-	stdio := server.NewStdioServer(s)
-	if err := stdio.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
-		log.Fatalf("server error: %v", err)
+	return s
+}
+
+// readOnlyHints returns the tool annotations shared by every tool here: it
+// changes nothing, destroys nothing and answers the same for the same input.
+// mcp.NewTool advertises the opposite by default (readOnlyHint false,
+// destructiveHint true), which makes clients ask for confirmation on each
+// call. openWorld is true only for a tool that reaches the network.
+func readOnlyHints(openWorld bool) mcp.ToolOption {
+	return func(tool *mcp.Tool) {
+		mcp.WithReadOnlyHintAnnotation(true)(tool)
+		mcp.WithDestructiveHintAnnotation(false)(tool)
+		mcp.WithIdempotentHintAnnotation(true)(tool)
+		mcp.WithOpenWorldHintAnnotation(openWorld)(tool)
 	}
 }
 
 func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("list_documents",
 		mcp.WithDescription("List all documents in the configured directory with format detection and metadata (filename, pages, size). Use this to discover available documents before reading or searching. Read-only."),
+		mcp.WithTitleAnnotation("List Documents"),
+		readOnlyHints(false),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -120,6 +144,8 @@ func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("read_document",
 		mcp.WithDescription("Read text content from a document with optional page selection. Use this when you need the raw text of a PDF, TXT, MD, CSV, or DOCX file; TXT/MD/CSV are returned verbatim, DOCX via pandoc; PDFs support page ranges (e.g. \"1-5\", \"1-3,7,10-12\") and auto-OCR fallback for scanned pages. Read-only."),
+		mcp.WithTitleAnnotation("Read Document"),
+		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to read"),
@@ -161,6 +187,8 @@ func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 func registerSearchDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("search_document",
 		mcp.WithDescription("Search for text within a document and return matching lines with context and approximate page numbers. Use this when you need to find specific content without reading the entire document. Read-only."),
+		mcp.WithTitleAnnotation("Search Document"),
+		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to search"),
@@ -194,6 +222,8 @@ func registerSearchDocument(s *server.MCPServer, reader *pdf.Reader) {
 func registerGetDocumentSummary(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("get_document_summary",
 		mcp.WithDescription("Get a quick summary by extracting the first 3 pages or ~100 lines of a document. Use this to preview document content before deciding to read it in full. Read-only."),
+		mcp.WithTitleAnnotation("Get Document Summary"),
+		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to summarize"),
@@ -218,6 +248,8 @@ func registerGetDocumentSummary(s *server.MCPServer, reader *pdf.Reader) {
 func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("get_document_metadata",
 		mcp.WithDescription("Get document metadata including title, author, dates, page count, and file size. Use this when you need document properties without reading its content; returns full PDF-specific fields (subject, creator, producer, version) for PDF files. Read-only."),
+		mcp.WithTitleAnnotation("Get Document Metadata"),
+		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to get metadata for"),
@@ -247,6 +279,8 @@ func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
 func registerExtractImages(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("extract_images",
 		mcp.WithDescription("Extract embedded images from a PDF as base64-encoded data, up to 10 per call. Use this when you need to retrieve figures, charts, or photos embedded in a PDF document. Read-only."),
+		mcp.WithTitleAnnotation("Extract Images"),
+		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to extract images from"),
@@ -281,6 +315,8 @@ func registerExtractImages(s *server.MCPServer, reader *pdf.Reader) {
 func registerReadURL(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("read_url",
 		mcp.WithDescription("Download a document from a URL and extract its text content (max 50MB). Use this when the document is hosted online rather than in the local directory; supports PDF and plain text URLs. Read-only, downloads to a temporary file."),
+		mcp.WithTitleAnnotation("Read URL"),
+		readOnlyHints(true),
 		mcp.WithString("url",
 			mcp.Required(),
 			mcp.Description("The URL of the document to download and read"),
@@ -310,6 +346,8 @@ func registerReadURL(s *server.MCPServer, reader *pdf.Reader) {
 func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("ocr_document",
 		mcp.WithDescription("Force OCR text extraction on a PDF, bypassing normal text extraction. Use this when read_document returns garbled or empty text from a scanned PDF; requires tesseract and pdftoppm. Read-only."),
+		mcp.WithTitleAnnotation("OCR Document"),
+		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The PDF filename to OCR"),
@@ -398,6 +436,8 @@ func downloadAndReadPDF(reader *pdf.Reader, url, pagesStr string) (string, error
 func registerListFormats(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("list_formats",
 		mcp.WithDescription("Show all supported document formats and their dependency installation status. Use this to check which formats are available and diagnose missing dependencies. Read-only."),
+		mcp.WithTitleAnnotation("List Formats"),
+		readOnlyHints(false),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -419,6 +459,8 @@ func registerListFormats(s *server.MCPServer, reader *pdf.Reader) {
 func registerReadImage(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("read_image",
 		mcp.WithDescription("Extract text from a standalone image file (PNG, JPG, TIFF, BMP) using OCR. Use this when you need to read text from an image rather than a document; supports multiple languages via tesseract. Read-only."),
+		mcp.WithTitleAnnotation("Read Image"),
+		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The image filename to OCR (must be in the documents directory)"),
@@ -452,6 +494,8 @@ func registerReadImage(s *server.MCPServer, reader *pdf.Reader) {
 func registerGetDocumentOutline(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("get_document_outline",
 		mcp.WithDescription("Extract the heading structure and table of contents from a document. Use this to understand document organization before reading specific sections; detects numbered sections, ALL-CAPS headings, and markdown # headings. Read-only."),
+		mcp.WithTitleAnnotation("Get Document Outline"),
+		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to extract outline from"),
@@ -485,6 +529,8 @@ func registerGetDocumentOutline(s *server.MCPServer, reader *pdf.Reader) {
 func registerExtractTables(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("extract_tables",
 		mcp.WithDescription("Extract table-like structures from a document, detecting pipe-delimited, tab-delimited, and multi-space-delimited columns. Use this when you need structured tabular data from a PDF, CSV, or text file. Read-only."),
+		mcp.WithTitleAnnotation("Extract Tables"),
+		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to extract tables from"),
@@ -523,6 +569,8 @@ func registerExtractTables(s *server.MCPServer, reader *pdf.Reader) {
 func registerConvertToMarkdown(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("convert_to_markdown",
 		mcp.WithDescription("Convert a document to clean Markdown format. Use this when you need structured, readable output from any document; for PDFs headings are detected and formatted, for TXT/CSV content is wrapped in code blocks, and MD files are returned as-is. Read-only."),
+		mcp.WithTitleAnnotation("Convert to Markdown"),
+		readOnlyHints(false),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to convert"),
