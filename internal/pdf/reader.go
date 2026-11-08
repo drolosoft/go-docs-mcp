@@ -770,11 +770,6 @@ func (r *Reader) extractFull(ctx context.Context, filename, path string) (string
 	return text, nil
 }
 
-// extractPage extracts text from a specific page range.
-func (r *Reader) extractPage(ctx context.Context, path string, firstPage, lastPage int) (string, error) {
-	return r.runPdftotext(ctx, path, firstPage, lastPage)
-}
-
 // runPdftotext invokes pdftotext with the given options.
 func (r *Reader) runPdftotext(ctx context.Context, path string, firstPage, lastPage int) (string, error) {
 	args := []string{"-layout"}
@@ -1111,7 +1106,12 @@ func (r *Reader) SearchDocument(ctx context.Context, filename, query string) (st
 	return header + strings.Join(results, "\n"), nil
 }
 
-// GetDocumentSummary returns the first 3 pages of text as a summary.
+// summaryPages is how much of a PDF GetDocumentSummary returns: three pages
+// usually hold the title, the abstract or the table of contents.
+const summaryPages = 3
+
+// GetDocumentSummary returns the first pages of a PDF, or the first lines of
+// any other document, as a summary.
 func (r *Reader) GetDocumentSummary(ctx context.Context, filename string) (string, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
@@ -1135,12 +1135,33 @@ func (r *Reader) GetDocumentSummary(ctx context.Context, filename string) (strin
 		return fmt.Sprintf("Summary (first %d lines) of %s:\n\n%s", len(lines), safe, strings.Join(lines, "")), nil
 	}
 
-	text, err := r.extractPage(ctx, path, 1, 3)
+	// The summary is cut from the cached full text, so it costs nothing
+	// after read_document or search_document and benefits from the OCR
+	// fallback. A scan too long to recognise in one call can still be
+	// summarised: then only its first pages are read, without the cache.
+	text, err := r.extractFull(ctx, safe, path)
+	if errors.Is(err, errTooManyPages) {
+		text, err = r.readPageRanges(ctx, path, [][2]int{{1, summaryPages}})
+	}
 	if err != nil {
 		return "", err
 	}
 
-	return fmt.Sprintf("Summary (first 3 pages) of %s:\n\n%s", safe, text), nil
+	return fmt.Sprintf("Summary (first %d pages) of %s:\n\n%s", summaryPages, safe, firstPages(text, summaryPages)), nil
+}
+
+// firstPages returns the first count pages of pdftotext or OCR text, where
+// every page ends with a form feed, or all of it when it has fewer pages.
+func firstPages(text string, count int) string {
+	end := 0
+	for range count {
+		next := strings.Index(text[end:], "\f")
+		if next < 0 {
+			return text
+		}
+		end += next + 1
+	}
+	return text[:end]
 }
 
 // GetDocumentMetadata returns full PDF metadata using pdfinfo.
@@ -1421,28 +1442,29 @@ func (r *Reader) GetDocumentOutline(ctx context.Context, filename string) ([]Out
 	}
 
 	ext := strings.ToLower(filepath.Ext(safe))
-
-	switch ext {
-	case ".md":
-		return r.outlineMarkdown(path)
-	case ".txt":
-		return r.outlineMarkdown(path) // try markdown headings in txt files too
-	case ".pdf":
-		return r.outlinePDF(ctx, path)
-	default:
+	if ext != ".md" && ext != ".txt" && ext != ".pdf" {
 		return nil, fmt.Errorf("outline extraction not supported for %s files", ext)
 	}
-}
 
-// outlineMarkdown parses markdown headings from a file.
-func (r *Reader) outlineMarkdown(path string) ([]OutlineEntry, error) {
-	data, err := os.ReadFile(path)
+	// The text comes from read_document's cache, with the OCR fallback for
+	// a scanned PDF.
+	text, err := r.extractFull(ctx, safe, path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
+		return nil, err
 	}
 
+	if ext == ".pdf" {
+		return r.outlinePDF(text), nil
+	}
+
+	// A .txt is searched for Markdown headings too.
+	return r.outlineMarkdown(text), nil
+}
+
+// outlineMarkdown parses markdown headings from the text of a file.
+func (r *Reader) outlineMarkdown(text string) []OutlineEntry {
 	var entries []OutlineEntry
-	lines := strings.Split(string(data), "\n")
+	lines := strings.Split(text, "\n")
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -1466,16 +1488,12 @@ func (r *Reader) outlineMarkdown(path string) ([]OutlineEntry, error) {
 		}
 	}
 
-	return entries, nil
+	return entries
 }
 
-// outlinePDF extracts heading-like structures from PDF text.
-func (r *Reader) outlinePDF(ctx context.Context, path string) ([]OutlineEntry, error) {
-	text, err := r.runPdftotext(ctx, path, 0, 0)
-	if err != nil {
-		return nil, err
-	}
-
+// outlinePDF extracts heading-like structures from PDF text, counting pages
+// by the form feed that ends each one.
+func (r *Reader) outlinePDF(text string) []OutlineEntry {
 	var entries []OutlineEntry
 	lines := strings.Split(text, "\n")
 	pageNum := 1
@@ -1544,7 +1562,7 @@ func (r *Reader) outlinePDF(ctx context.Context, path string) ([]OutlineEntry, e
 		}
 	}
 
-	return entries, nil
+	return entries
 }
 
 // matchNumberedHeading checks if a line matches numbered heading patterns.
@@ -1608,32 +1626,36 @@ func (r *Reader) ExtractTables(ctx context.Context, filename string, page int) (
 	}
 
 	ext := strings.ToLower(filepath.Ext(safe))
+	if ext != ".csv" && ext != ".md" && ext != ".txt" && ext != ".pdf" {
+		return nil, fmt.Errorf("table extraction not supported for %s files", ext)
+	}
+
+	if ext == ".pdf" {
+		return r.tablesPDF(ctx, safe, path, page)
+	}
+
+	// Text formats come from read_document's cache like everything else.
+	text, err := r.extractFull(ctx, safe, path)
+	if err != nil {
+		return nil, err
+	}
 
 	switch ext {
 	case ".csv":
-		return r.tablesCSV(path)
+		return r.tablesCSV(text)
 	case ".md":
-		return r.tablesMarkdown(path)
-	case ".pdf":
-		return r.tablesPDF(ctx, path, page)
-	case ".txt":
-		return r.tablesPlaintext(path)
+		return r.tablesMarkdown(text), nil
 	default:
-		return nil, fmt.Errorf("table extraction not supported for %s files", ext)
+		return r.detectTablesFromLayout(text, 0), nil
 	}
 }
 
-// tablesCSV parses the entire CSV file as a single table with encoding/csv,
+// tablesCSV parses the text of a CSV file as a single table with encoding/csv,
 // so a quoted field may hold commas, doubled quotes and line breaks. Rows may
 // have different lengths and every cell is trimmed, as the table of a
 // hand-written CSV usually needs.
-func (r *Reader) tablesCSV(path string) ([]TableData, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
-	}
-
-	csvReader := csv.NewReader(bytes.NewReader(data))
+func (r *Reader) tablesCSV(text string) ([]TableData, error) {
+	csvReader := csv.NewReader(strings.NewReader(text))
 	csvReader.FieldsPerRecord = -1
 
 	// A stray quote inside an unquoted field is common in exported files;
@@ -1657,14 +1679,10 @@ func (r *Reader) tablesCSV(path string) ([]TableData, error) {
 	return []TableData{{Page: 1, Rows: rows}}, nil
 }
 
-// tablesMarkdown parses pipe-delimited tables from a markdown file.
-func (r *Reader) tablesMarkdown(path string) ([]TableData, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
-	}
-
-	lines := strings.Split(string(data), "\n")
+// tablesMarkdown parses pipe-delimited tables from the text of a markdown
+// file.
+func (r *Reader) tablesMarkdown(text string) []TableData {
+	lines := strings.Split(text, "\n")
 	var tables []TableData
 	var currentRows [][]string
 
@@ -1697,7 +1715,7 @@ func (r *Reader) tablesMarkdown(path string) ([]TableData, error) {
 		tables = append(tables, TableData{Page: 1, Rows: currentRows})
 	}
 
-	return tables, nil
+	return tables
 }
 
 // parsePipeRow splits a pipe-delimited row into cells.
@@ -1719,30 +1737,23 @@ func parsePipeRow(line string) []string {
 	return cells
 }
 
-// tablesPDF extracts table-like structures from PDF text using layout analysis.
-func (r *Reader) tablesPDF(ctx context.Context, path string, page int) ([]TableData, error) {
+// tablesPDF extracts table-like structures from PDF text using layout
+// analysis. The text is read as read_document reads it: the whole document
+// from the cache, or one page checked against the page count, both with the
+// OCR fallback for scanned pages.
+func (r *Reader) tablesPDF(ctx context.Context, filename, path string, page int) ([]TableData, error) {
 	var text string
 	var err error
 	if page > 0 {
-		text, err = r.runPdftotext(ctx, path, page, page)
+		text, err = r.readPageRanges(ctx, path, [][2]int{{page, page}})
 	} else {
-		text, err = r.runPdftotext(ctx, path, 0, 0)
+		text, err = r.extractFull(ctx, filename, path)
 	}
 	if err != nil {
 		return nil, err
 	}
 
 	return r.detectTablesFromLayout(text, page), nil
-}
-
-// tablesPlaintext extracts table-like structures from plain text files.
-func (r *Reader) tablesPlaintext(path string) ([]TableData, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
-	}
-
-	return r.detectTablesFromLayout(string(data), 0), nil
 }
 
 // detectTablesFromLayout detects table-like patterns in text with spatial layout.

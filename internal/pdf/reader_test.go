@@ -2278,3 +2278,127 @@ func TestWebP_IsAnImageFormat(t *testing.T) {
 		t.Errorf("ListFormats should name .webp among the tesseract formats: %+v", r.ListFormats())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 31. Summary, outline and tables share read_document's cache and OCR
+// ---------------------------------------------------------------------------
+
+// useLoggedTextPDF points the reader at a pdfinfo that reports pageCount
+// pages and a pdftotext that prints them, each with a heading, a two-row
+// table and enough text not to look scanned, both logged.
+func useLoggedTextPDF(t *testing.T, r *Reader, log *invocationLog, pageCount int) {
+	t.Helper()
+	bin := t.TempDir()
+
+	r.pdfinfoBin = writeFakeBinary(t, bin, "pdfinfo", log.record("pdfinfo")+fmt.Sprintf("echo 'Pages:          %d'\n", pageCount))
+	r.pdftotextBin = writeFakeBinary(t, bin, "pdftotext", log.record("pdftotext")+fmt.Sprintf(
+		"page=1\nwhile [ $page -le %d ]; do\n"+
+			"printf 'CHAPTER %%s\\n\\n%s\\nName     Count\\nAlpha    %%s\\n\\f' $page $page\n"+
+			"page=$((page + 1))\ndone\n", pageCount, longPageText))
+}
+
+func TestGetDocumentSummary_PDFIsServedFromTheCache(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "book.pdf", "%PDF-1.4 never parsed by the fakes")
+	log := newInvocationLog(t)
+	useLoggedTextPDF(t, r, log, 5)
+
+	first, err := r.GetDocumentSummary(t.Context(), "book.pdf")
+	if err != nil {
+		t.Fatalf("first GetDocumentSummary: %v", err)
+	}
+	second, err := r.GetDocumentSummary(t.Context(), "book.pdf")
+	if err != nil {
+		t.Fatalf("second GetDocumentSummary: %v", err)
+	}
+
+	if first != second {
+		t.Errorf("the cached summary differs from the first one:\n%q\n%q", first, second)
+	}
+	if !strings.Contains(first, "CHAPTER 3") || strings.Contains(first, "CHAPTER 4") {
+		t.Errorf("summary should hold pages 1 to 3 and nothing after: %q", first)
+	}
+	if runs := log.count(t, "pdftotext"); runs != 1 {
+		t.Errorf("pdftotext ran %d times for two summaries, want 1", runs)
+	}
+}
+
+func TestOutlineAndTables_ReuseTheCachedPDFText(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "book.pdf", "%PDF-1.4 never parsed by the fakes")
+	log := newInvocationLog(t)
+	useLoggedTextPDF(t, r, log, 2)
+
+	if _, err := r.ReadDocument(t.Context(), "book.pdf", 0); err != nil {
+		t.Fatalf("ReadDocument: %v", err)
+	}
+
+	outline, err := r.GetDocumentOutline(t.Context(), "book.pdf")
+	if err != nil {
+		t.Fatalf("GetDocumentOutline: %v", err)
+	}
+	tables, err := r.ExtractTables(t.Context(), "book.pdf", 0)
+	if err != nil {
+		t.Fatalf("ExtractTables: %v", err)
+	}
+
+	if len(outline) == 0 || outline[len(outline)-1].Page != 2 {
+		t.Errorf("outline should end on page 2: %+v", outline)
+	}
+	if len(tables) != 2 || tables[1].Page != 2 {
+		t.Errorf("want one table on each of the two pages: %+v", tables)
+	}
+	if runs := log.count(t, "pdftotext"); runs != 1 {
+		t.Errorf("pdftotext ran %d times for read, outline and tables, want 1", runs)
+	}
+}
+
+func TestGetDocumentSummary_ScannedPDFFallsBackToOCR(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "scan.pdf", "%PDF-1.4 never parsed by the fakes")
+	useFakePagedOCR(t, r, 2)
+
+	got, err := r.GetDocumentSummary(t.Context(), "scan.pdf")
+	if err != nil {
+		t.Fatalf("GetDocumentSummary on a scan: %v", err)
+	}
+	if !strings.Contains(got, "Scanned page 1") || !strings.Contains(got, "Scanned page 2") {
+		t.Errorf("summary of a scan should hold the OCR text: %q", got)
+	}
+}
+
+func TestGetDocumentSummary_LongScanOnlyRecognisesTheFirstPages(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "archive.pdf", "%PDF-1.4 never parsed by the fakes")
+	useFakePagedOCR(t, r, 500)
+
+	// The whole scan is over the per-call OCR cap, but a summary only needs
+	// its first pages.
+	got, err := r.GetDocumentSummary(t.Context(), "archive.pdf")
+	if err != nil {
+		t.Fatalf("GetDocumentSummary on a 500-page scan: %v", err)
+	}
+	if !strings.Contains(got, "Scanned page 3") || strings.Contains(got, "Scanned page 4") {
+		t.Errorf("summary should be the OCR of pages 1 to 3: %q", got)
+	}
+}
+
+func TestExtractTables_ScannedPageFallsBackToOCR(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "scan.pdf", "%PDF-1.4 never parsed by the fakes")
+
+	bin := t.TempDir()
+	r.pdfinfoBin = writeFakeBinary(t, bin, "pdfinfo", "echo 'Pages:          3'\n")
+	r.pdftotextBin = writeFakeBinary(t, bin, "pdftotext", "")
+	r.pdftoppmBin = writeFakeBinary(t, bin, "pdftoppm", "for arg; do prefix=$arg; done\n: > \"$prefix.tif\"\n")
+	r.tesseractBin = writeFakeBinary(t, bin, "tesseract", "cat > /dev/null\nprintf 'Name     Count\\nAlpha    1\\nBeta     2\\n'\n")
+	r.hasOCR = true
+
+	tables, err := r.ExtractTables(t.Context(), "scan.pdf", 2)
+	if err != nil {
+		t.Fatalf("ExtractTables(page 2) on a scan: %v", err)
+	}
+	if len(tables) != 1 || len(tables[0].Rows) != 3 || tables[0].Page != 2 {
+		t.Errorf("want the recognised three-row table on page 2, got %+v", tables)
+	}
+}
