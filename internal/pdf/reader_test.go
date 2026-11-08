@@ -2,13 +2,20 @@ package pdf
 
 import (
 	"archive/zip"
+	"bytes"
+	"compress/zlib"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1304,7 +1311,7 @@ func TestDocuments_SymlinkOutsideDirIsRejected(t *testing.T) {
 		"ReadImage":           func() (any, error) { return r.ReadImage(t.Context(), "innocent.png", "eng") },
 		"ReadDocumentPages":   func() (any, error) { return r.ReadDocumentPages(t.Context(), "innocent.pdf", "1") },
 		"GetDocumentMetadata": func() (any, error) { return r.GetDocumentMetadata(t.Context(), "innocent.pdf") },
-		"ExtractImages":       func() (any, error) { return r.ExtractImages(t.Context(), "innocent.pdf", 0) },
+		"ExtractImages":       func() (any, error) { return r.ExtractImages(t.Context(), "innocent.pdf", 0, 1) },
 		"OCRDocument":         func() (any, error) { return r.OCRDocument(t.Context(), "innocent.pdf", 1, "eng") },
 	}
 
@@ -2736,5 +2743,327 @@ func TestSearchDocument_CapsMaxResults(t *testing.T) {
 
 	if count := strings.Count(got, "--- Match "); count != MaxSearchResultsLimit {
 		t.Errorf("rendered %d matches, want the cap of %d", count, MaxSearchResultsLimit)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Image extraction
+// ---------------------------------------------------------------------------
+
+// imageFixture describes the picture writeImagePDF embeds: its size, how
+// many times the page draws it, and whether its pixels are random noise,
+// which PNG cannot compress, or a smooth gradient, which it can.
+type imageFixture struct {
+	width  int
+	height int
+	draws  int
+	noise  bool
+}
+
+// writeImagePDF writes a one-page PDF whose page draws one RGB image
+// XObject fixture.draws times. The image carries a soft mask, which
+// pdfimages lists and extracts as a second "smask" image, so tests can check
+// that the mask is never returned as a picture.
+func writeImagePDF(t *testing.T, path string, fixture imageFixture) {
+	t.Helper()
+
+	pixels := make([]byte, fixture.width*fixture.height*3)
+	alpha := make([]byte, fixture.width*fixture.height)
+	random := rand.New(rand.NewPCG(1, 2))
+
+	for y := range fixture.height {
+		for x := range fixture.width {
+			index := y*fixture.width + x
+			alpha[index] = byte(x + y)
+
+			if fixture.noise {
+				value := random.Uint32()
+				pixels[index*3] = byte(value)
+				pixels[index*3+1] = byte(value >> 8)
+				pixels[index*3+2] = byte(value >> 16)
+				continue
+			}
+			pixels[index*3] = byte(x)
+			pixels[index*3+1] = byte(y)
+			pixels[index*3+2] = byte(x ^ y)
+		}
+	}
+
+	var drawing strings.Builder
+	for draw := range fixture.draws {
+		fmt.Fprintf(&drawing, "q 100 0 0 100 %d 100 cm /Im1 Do Q ", 50+draw*110)
+	}
+	content := drawing.String()
+
+	imageStream := deflateBytes(t, pixels)
+	maskStream := deflateBytes(t, alpha)
+
+	objects := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+		fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /SMask 6 0 R /Length %d >>\nstream\n%s\nendstream", fixture.width, fixture.height, len(imageStream), imageStream),
+		fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", fixture.width, fixture.height, len(maskStream), maskStream),
+	}
+
+	// The cross-reference table needs the byte offset of every object.
+	var document strings.Builder
+	document.WriteString("%PDF-1.4\n")
+	var offsets []int
+	for index, object := range objects {
+		offsets = append(offsets, document.Len())
+		fmt.Fprintf(&document, "%d 0 obj\n%s\nendobj\n", index+1, object)
+	}
+
+	xrefOffset := document.Len()
+	fmt.Fprintf(&document, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for _, offset := range offsets {
+		fmt.Fprintf(&document, "%010d 00000 n \n", offset)
+	}
+	fmt.Fprintf(&document, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xrefOffset)
+
+	if err := os.WriteFile(path, []byte(document.String()), 0o644); err != nil {
+		t.Fatalf("failed to write %s: %v", path, err)
+	}
+}
+
+// deflateBytes compresses data with zlib, the PDF FlateDecode filter.
+func deflateBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(data); err != nil {
+		t.Fatalf("deflate: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("deflate: %v", err)
+	}
+
+	return compressed.Bytes()
+}
+
+// requirePdfimages skips a test on a machine without poppler's pdfimages.
+func requirePdfimages(t *testing.T, r *Reader) {
+	t.Helper()
+
+	if _, err := exec.LookPath(r.pdfimagesBin); err != nil {
+		t.Skip("pdfimages (poppler) is not installed")
+	}
+}
+
+// decodeImage decodes the base64 PNG of an extracted image.
+func decodeImage(t *testing.T, info ImageInfo) image.Image {
+	t.Helper()
+
+	data, err := base64.StdEncoding.DecodeString(info.DataBase64)
+	if err != nil {
+		t.Fatalf("image %d is not valid base64: %v", info.Index, err)
+	}
+
+	decoded, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("image %d is not a PNG: %v", info.Index, err)
+	}
+
+	return decoded
+}
+
+func TestExtractImages_ScalesALargeImageToPNGAndSkipsItsMask(t *testing.T) {
+	r, dir := newTestReader(t)
+	requirePdfimages(t, r)
+	writeImagePDF(t, filepath.Join(dir, "figure.pdf"), imageFixture{width: 2048, height: 1024, draws: 1})
+
+	extraction, err := r.ExtractImages(t.Context(), "figure.pdf", 0, DefaultMaxImages)
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+
+	if extraction.Found != 1 || len(extraction.Images) != 1 {
+		t.Fatalf("found %d and returned %d images, want 1 and 1: the smask is not a picture", extraction.Found, len(extraction.Images))
+	}
+
+	info := extraction.Images[0]
+	if info.Format != "png" || info.MIMEType != "image/png" {
+		t.Errorf("format %q, MIME %q; want png, image/png", info.Format, info.MIMEType)
+	}
+	if info.Width != MaxImageSide || info.Height != MaxImageSide/2 || info.OriginalWidth != 2048 || info.OriginalHeight != 1024 {
+		t.Errorf("size %dx%d from %dx%d, want %dx%d from 2048x1024", info.Width, info.Height, info.OriginalWidth, info.OriginalHeight, MaxImageSide, MaxImageSide/2)
+	}
+
+	bounds := decodeImage(t, info).Bounds()
+	if bounds.Dx() != info.Width || bounds.Dy() != info.Height {
+		t.Errorf("the PNG is %dx%d, the info says %dx%d", bounds.Dx(), bounds.Dy(), info.Width, info.Height)
+	}
+	if len(info.DataBase64) > ImageBudgetBytes {
+		t.Errorf("image takes %d bytes, over the %d budget", len(info.DataBase64), ImageBudgetBytes)
+	}
+}
+
+func TestExtractImages_ReturnsASmallImageUnscaled(t *testing.T) {
+	r, dir := newTestReader(t)
+	requirePdfimages(t, r)
+	writeImagePDF(t, filepath.Join(dir, "icon.pdf"), imageFixture{width: 300, height: 200, draws: 1})
+
+	extraction, err := r.ExtractImages(t.Context(), "icon.pdf", 1, DefaultMaxImages)
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+
+	if len(extraction.Images) != 1 {
+		t.Fatalf("returned %d images, want 1", len(extraction.Images))
+	}
+
+	info := extraction.Images[0]
+	if info.Page != 1 || info.Width != 300 || info.Height != 200 || info.OriginalWidth != 300 {
+		t.Errorf("image = page %d, %dx%d from %dx%d; want page 1, 300x200 unscaled", info.Page, info.Width, info.Height, info.OriginalWidth, info.OriginalHeight)
+	}
+}
+
+func TestExtractImages_StopsAtMaxImages(t *testing.T) {
+	r, dir := newTestReader(t)
+	requirePdfimages(t, r)
+	writeImagePDF(t, filepath.Join(dir, "gallery.pdf"), imageFixture{width: 300, height: 200, draws: 3})
+
+	extraction, err := r.ExtractImages(t.Context(), "gallery.pdf", 0, 2)
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+
+	if extraction.Found != 3 || len(extraction.Images) != 2 {
+		t.Errorf("found %d and returned %d, want 3 and 2", extraction.Found, len(extraction.Images))
+	}
+	if !strings.Contains(strings.Join(extraction.Notes, " "), "max_images") {
+		t.Errorf("the notes must say max_images stopped the call, got %q", extraction.Notes)
+	}
+}
+
+func TestExtractImages_KeepsEveryImageUnderItsCapAndTheTotalUnderTheBudget(t *testing.T) {
+	r, dir := newTestReader(t)
+	requirePdfimages(t, r)
+
+	// Noise does not compress: 1200x1200 RGB is a PNG of about 4.3 MB,
+	// 5.8 MB in base64, so each image must be shrunk under its cap and the
+	// third no longer fits the budget.
+	writeImagePDF(t, filepath.Join(dir, "noise.pdf"), imageFixture{width: 1200, height: 1200, draws: 3, noise: true})
+
+	extraction, err := r.ExtractImages(t.Context(), "noise.pdf", 0, DefaultMaxImages)
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+
+	total := 0
+	for _, info := range extraction.Images {
+		if len(info.DataBase64) > maxImageBytes {
+			t.Errorf("image %d takes %d bytes, over the per-image cap of %d", info.Index, len(info.DataBase64), maxImageBytes)
+		}
+		if info.Width >= 1200 {
+			t.Errorf("image %d kept its %d px width, it should have been shrunk to fit its cap", info.Index, info.Width)
+		}
+		total += len(info.DataBase64)
+	}
+
+	if total > ImageBudgetBytes {
+		t.Errorf("images take %d bytes, over the %d budget", total, ImageBudgetBytes)
+	}
+	if extraction.Found != 3 || len(extraction.Images) != 2 {
+		t.Errorf("found %d and returned %d, want 3 and 2", extraction.Found, len(extraction.Images))
+	}
+	if !strings.Contains(strings.Join(extraction.Notes, " "), "budget") {
+		t.Errorf("the notes must say the budget stopped the call, got %q", extraction.Notes)
+	}
+}
+
+func TestExtractImages_APageWithoutPicturesGivesAnEmptyList(t *testing.T) {
+	r, dir := newTestReader(t)
+	requirePdfimages(t, r)
+	writeImagePDF(t, filepath.Join(dir, "plain.pdf"), imageFixture{width: 64, height: 64, draws: 0})
+
+	extraction, err := r.ExtractImages(t.Context(), "plain.pdf", 0, DefaultMaxImages)
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+
+	if extraction.Found != 0 || extraction.Images == nil || len(extraction.Images) != 0 {
+		t.Errorf("extraction = %+v, want found 0 and an empty, non-nil list", extraction)
+	}
+}
+
+func TestExtractImages_RejectsMaxImagesBelowOne(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "doc.pdf", "%PDF-1.4")
+
+	if _, err := r.ExtractImages(t.Context(), "doc.pdf", 0, 0); err == nil {
+		t.Error("max_images 0 must be an error")
+	}
+}
+
+func TestParseImageList_ReadsEveryRowAndItsType(t *testing.T) {
+	listing := `page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   1     0 image    2048  2048  rgb     3   8  image  no         5  0   369   369 1493K  12%
+   1     1 smask    2048  2048  gray    1   8  image  no         5  0   369   369 22.6K 0.6%
+   2     2 stencil    64    64  -       1   1  image  no         9  0    72    72   12B  0.1%
+`
+
+	got := parseImageList(listing)
+
+	want := []listedImage{
+		{page: 1, number: 0, kind: "image", width: 2048, height: 2048},
+		{page: 1, number: 1, kind: "smask", width: 2048, height: 2048},
+		{page: 2, number: 2, kind: "stencil", width: 64, height: 64},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("parseImageList = %+v, want %+v", got, want)
+	}
+}
+
+func TestScaledSize(t *testing.T) {
+	cases := []struct {
+		width, height, longest int
+		wantWidth, wantHeight  int
+	}{
+		{800, 600, 1600, 800, 600},
+		{3200, 1600, 1600, 1600, 800},
+		{1000, 4000, 1600, 400, 1600},
+		{5000, 1, 1600, 1600, 1},
+	}
+
+	for _, testCase := range cases {
+		width, height := scaledSize(testCase.width, testCase.height, testCase.longest)
+
+		if width != testCase.wantWidth || height != testCase.wantHeight {
+			t.Errorf("scaledSize(%d, %d, %d) = %dx%d, want %dx%d", testCase.width, testCase.height, testCase.longest, width, height, testCase.wantWidth, testCase.wantHeight)
+		}
+	}
+}
+
+func TestBoxResample_AveragesTheCoveredPixels(t *testing.T) {
+	gray := image.NewGray(image.Rect(0, 0, 4, 2))
+	copy(gray.Pix, []uint8{
+		0, 100, 200, 200,
+		100, 200, 40, 40,
+	})
+
+	scaled := boxResample(gray, 2, 1)
+
+	result, ok := scaled.(*image.Gray)
+	if !ok {
+		t.Fatalf("a gray source must give a gray result, got %T", scaled)
+	}
+	if !slices.Equal(result.Pix, []uint8{100, 120}) {
+		t.Errorf("gray pixels = %v, want [100 120]", result.Pix)
+	}
+
+	colour := image.NewNRGBA(image.Rect(0, 0, 2, 1))
+	copy(colour.Pix, []uint8{255, 0, 0, 255, 0, 0, 255, 255})
+
+	mixed, ok := boxResample(colour, 1, 1).(*image.RGBA)
+	if !ok {
+		t.Fatalf("a colour source must give an RGBA result, got %T", mixed)
+	}
+	if !slices.Equal(mixed.Pix, []uint8{128, 0, 128, 255}) {
+		t.Errorf("colour pixel = %v, want [128 0 128 255]", mixed.Pix)
 	}
 }

@@ -1,8 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"compress/zlib"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image/png"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -142,6 +148,7 @@ func TestPagedTools_AdvertiseOffsetAndMaxChars(t *testing.T) {
 		"convert_to_markdown": {"offset", "max_chars"},
 		"ocr_document":        {"offset", "max_chars"},
 		"search_document":     {"max_results"},
+		"extract_images":      {"max_images"},
 	}
 
 	for _, tool := range envelope.Result.Tools {
@@ -220,5 +227,118 @@ func TestServer_RefusesAResultOverTheSizeLimit(t *testing.T) {
 
 	if !result.IsError || !strings.Contains(result.Content[0].Text, "tool result exceeds") {
 		t.Errorf("an oversized result must be replaced by an error, got isError=%v and %d content items", result.IsError, len(result.Content))
+	}
+}
+
+// writeMaskedImagePDF writes a one-page PDF with a width by height RGB
+// gradient that carries a soft mask, which pdfimages extracts as a second,
+// grey image.
+func writeMaskedImagePDF(t *testing.T, path string, width, height int) {
+	t.Helper()
+
+	pixels := make([]byte, width*height*3)
+	alpha := make([]byte, width*height)
+	for index := range alpha {
+		x, y := index%width, index/width
+		pixels[index*3] = byte(x)
+		pixels[index*3+1] = byte(y)
+		alpha[index] = byte(x + y)
+	}
+
+	content := "q 400 0 0 200 100 100 cm /Im1 Do Q"
+	imageStream := deflate(t, pixels)
+	maskStream := deflate(t, alpha)
+
+	objects := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+		fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /SMask 6 0 R /Length %d >>\nstream\n%s\nendstream", width, height, len(imageStream), imageStream),
+		fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", width, height, len(maskStream), maskStream),
+	}
+
+	// The cross-reference table needs the byte offset of every object.
+	var document strings.Builder
+	document.WriteString("%PDF-1.4\n")
+	var offsets []int
+	for index, object := range objects {
+		offsets = append(offsets, document.Len())
+		fmt.Fprintf(&document, "%d 0 obj\n%s\nendobj\n", index+1, object)
+	}
+
+	xrefOffset := document.Len()
+	fmt.Fprintf(&document, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for _, offset := range offsets {
+		fmt.Fprintf(&document, "%010d 00000 n \n", offset)
+	}
+	fmt.Fprintf(&document, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xrefOffset)
+
+	if err := os.WriteFile(path, []byte(document.String()), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// deflate compresses data with zlib, the PDF FlateDecode filter.
+func deflate(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(data); err != nil {
+		t.Fatalf("deflate: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("deflate: %v", err)
+	}
+
+	return compressed.Bytes()
+}
+
+func TestExtractImages_ReturnsPNGImageContentWithoutTheMask(t *testing.T) {
+	mcpServer, docsDir := newTestServer(t)
+	writeMaskedImagePDF(t, filepath.Join(docsDir, "figure.pdf"), 2048, 1024)
+
+	result := callToolMayFail(t, mcpServer, "extract_images", map[string]any{"filename": "figure.pdf"})
+
+	if result.IsError {
+		t.Fatalf("extract_images failed: %+v", result.Content)
+	}
+	if len(result.Content) != 2 {
+		t.Fatalf("got %d content items, want the description and one image: the soft mask must not come back as a second image", len(result.Content))
+	}
+
+	description, picture := result.Content[0], result.Content[1]
+	if description.Type != "text" || !strings.Contains(description.Text, `"found": 1`) {
+		t.Errorf("first item should describe the extraction, got %s: %.300s", description.Type, description.Text)
+	}
+	if picture.Type != "image" || picture.MIMEType != "image/png" {
+		t.Fatalf("second item is %s %s, want image image/png", picture.Type, picture.MIMEType)
+	}
+	if len(picture.Data) > pdf.ImageBudgetBytes {
+		t.Errorf("image takes %d bytes, over the %d budget", len(picture.Data), pdf.ImageBudgetBytes)
+	}
+
+	data, err := base64.StdEncoding.DecodeString(picture.Data)
+	if err != nil {
+		t.Fatalf("image data is not base64: %v", err)
+	}
+	config, err := png.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("image data is not a PNG: %v", err)
+	}
+	if config.Width != pdf.MaxImageSide || config.Height != pdf.MaxImageSide/2 {
+		t.Errorf("PNG is %dx%d, want %dx%d", config.Width, config.Height, pdf.MaxImageSide, pdf.MaxImageSide/2)
+	}
+}
+
+func TestExtractImages_PagePastTheEndIsAnError(t *testing.T) {
+	mcpServer, docsDir := newTestServer(t)
+	writeMaskedImagePDF(t, filepath.Join(docsDir, "figure.pdf"), 64, 32)
+
+	result := callToolMayFail(t, mcpServer, "extract_images", map[string]any{"filename": "figure.pdf", "page": 2})
+
+	if !result.IsError {
+		t.Errorf("page 2 of a one-page PDF must be an error result, got %+v", result.Content)
 	}
 }

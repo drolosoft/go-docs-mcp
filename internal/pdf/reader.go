@@ -8,6 +8,9 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"image"
+	"image/draw"
+	"image/png"
 	"io"
 	"io/fs"
 	"os"
@@ -45,16 +48,6 @@ type DocumentMetadata struct {
 	Pages        int    `json:"pages"`
 	FileSize     int64  `json:"file_size_bytes"`
 	PDFVersion   string `json:"pdf_version"`
-}
-
-// ImageInfo holds information about an extracted image.
-type ImageInfo struct {
-	Page       int    `json:"page"`
-	Index      int    `json:"index"`
-	Format     string `json:"format"`
-	Width      int    `json:"width,omitempty"`
-	Height     int    `json:"height,omitempty"`
-	DataBase64 string `json:"data_base64"`
 }
 
 // cacheEntry stores extracted text with its modification time for invalidation.
@@ -1429,9 +1422,115 @@ func (r *Reader) GetDocumentMetadata(ctx context.Context, filename string) (*Doc
 	return meta, nil
 }
 
-// ExtractImages extracts images from a PDF using pdfimages.
-// If page > 0, only extracts from that page. Returns up to 10 images.
-func (r *Reader) ExtractImages(ctx context.Context, filename string, page int) ([]ImageInfo, error) {
+// MaxImageSide is the longest side, in pixels, of an image extract_images
+// returns. Vision models scale anything larger down to about this size
+// before looking at it, so sending more only costs bytes.
+const MaxImageSide = 1600
+
+// ImageBudgetBytes is how much base64 image data one extract_images call may
+// return in total. 8 MB holds several figures at full size and keeps the
+// result far from the tens of megabytes raw extraction used to produce.
+const ImageBudgetBytes = 8 << 20
+
+// maxImageBytes caps the base64 data of a single image. Clients reject an
+// image over 5 MB, so an image still larger after scaling is shrunk further
+// until it fits under 4 MB.
+const maxImageBytes = 4 << 20
+
+// DefaultMaxImages is how many images extract_images returns when the
+// client does not say.
+const DefaultMaxImages = 10
+
+// MaxImagesLimit caps max_images. Every image is decoded and scaled in
+// memory, so the cap bounds the work of one call as the budget bounds its
+// size.
+const MaxImagesLimit = 50
+
+// maxDecodePixels refuses to decode an image larger than 40 megapixels, an
+// A4 page scanned at 600 dpi with room to spare. Decoding takes four bytes a
+// pixel, and a crafted PDF can declare an image of any size.
+const maxDecodePixels = 40_000_000
+
+// minImageSide is the smallest longer side an oversized image is shrunk to
+// before giving up: a picture under 64 px no longer shows anything.
+const minImageSide = 64
+
+// ImageInfo describes one image extracted from a PDF, always as PNG. Width
+// and Height are the size of the PNG returned, OriginalWidth and
+// OriginalHeight the size embedded in the document. Index is the image
+// number pdfimages gives it within the requested pages.
+type ImageInfo struct {
+	Page           int    `json:"page"`
+	Index          int    `json:"index"`
+	Format         string `json:"format"`
+	MIMEType       string `json:"mime_type"`
+	Width          int    `json:"width"`
+	Height         int    `json:"height"`
+	OriginalWidth  int    `json:"original_width"`
+	OriginalHeight int    `json:"original_height"`
+
+	// DataBase64 is the PNG itself. It is left out of the JSON because the
+	// tool sends it as image content, not inside the text.
+	DataBase64 string `json:"-"`
+}
+
+// ImageExtraction is the result of ExtractImages: the images returned, how
+// many pictures the requested pages hold (masks are not counted), and a note
+// for every image left out and why.
+type ImageExtraction struct {
+	Images []ImageInfo `json:"images"`
+	Found  int         `json:"found"`
+	Notes  []string    `json:"notes,omitempty"`
+}
+
+// listedImage is one row of pdfimages -list.
+type listedImage struct {
+	page   int
+	number int
+	kind   string
+	width  int
+	height int
+}
+
+// parseImageList reads the rows of pdfimages -list. The kind column says
+// whether a row is a picture ("image") or the transparency of one ("smask",
+// "mask", "stencil").
+func parseImageList(listing string) []listedImage {
+	var images []listedImage
+
+	for _, line := range strings.Split(listing, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+
+		page, errPage := strconv.Atoi(fields[0])
+		number, errNumber := strconv.Atoi(fields[1])
+		width, errWidth := strconv.Atoi(fields[3])
+		height, errHeight := strconv.Atoi(fields[4])
+
+		// The header and the dashed rule under it do not parse as numbers.
+		if errors.Join(errPage, errNumber, errWidth, errHeight) != nil {
+			continue
+		}
+
+		images = append(images, listedImage{page: page, number: number, kind: fields[2], width: width, height: height})
+	}
+
+	return images
+}
+
+// ExtractImages extracts the pictures of a PDF as PNG, scaled to at most
+// MaxImageSide on the longer side. If page > 0, only that page is read. It
+// returns at most maxImages of them (capped at MaxImagesLimit) and stops
+// before the base64 data passes ImageBudgetBytes. Soft masks and stencils
+// are never returned as images of their own.
+func (r *Reader) ExtractImages(ctx context.Context, filename string, page, maxImages int) (*ImageExtraction, error) {
+	if maxImages < 1 {
+		return nil, fmt.Errorf("max_images must be 1 or more, got %d", maxImages)
+	}
+	maxImages = min(maxImages, MaxImagesLimit)
+
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return nil, err
@@ -1442,12 +1541,47 @@ func (r *Reader) ExtractImages(ctx context.Context, filename string, page int) (
 		return nil, err
 	}
 
-	return r.extractImagesFromPath(ctx, path, page)
+	return r.extractImagesFromPath(ctx, path, page, maxImages)
 }
 
-// extractImagesFromPath extracts images from an arbitrary PDF path.
-func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page int) ([]ImageInfo, error) {
-	// Create temp directory for extracted images
+// extractImagesFromPath extracts the pictures of the PDF at path for
+// ExtractImages.
+func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page, maxImages int) (*ImageExtraction, error) {
+	var firstPageArgs []string
+	if page > 0 {
+		firstPageArgs = []string{"-f", strconv.Itoa(page)}
+	}
+
+	listArgs := append([]string{"-list"}, firstPageArgs...)
+	if page > 0 {
+		listArgs = append(listArgs, "-l", strconv.Itoa(page))
+	}
+	listArgs = append(listArgs, path)
+
+	listing, err := runTool(ctx, toolTimeout, nil, path, r.pdfimagesBin, listArgs...)
+	if err != nil {
+		return nil, err
+	}
+
+	// A soft mask is listed and extracted as an image of its own, a grey
+	// picture of the transparency; only the real pictures are returned.
+	var pictures []listedImage
+	for _, listed := range parseImageList(listing) {
+		if listed.kind == "image" {
+			pictures = append(pictures, listed)
+		}
+	}
+
+	extraction := &ImageExtraction{Images: []ImageInfo{}, Found: len(pictures)}
+	if len(pictures) == 0 {
+		return extraction, nil
+	}
+
+	selected := pictures[:min(maxImages, len(pictures))]
+	if len(selected) < len(pictures) {
+		extraction.Notes = append(extraction.Notes, fmt.Sprintf("returned the first %d of %d images; raise max_images or ask for one page to see the others", len(selected), len(pictures)))
+	}
+
 	tmpDir, err := os.MkdirTemp("", "go-docs-mcp-images-")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp dir: %w", withoutPath(err))
@@ -1456,100 +1590,204 @@ func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page in
 
 	prefix := filepath.Join(tmpDir, "img")
 
-	// Build pdfimages command: -j outputs in native format (jpeg/png/etc)
-	args := []string{"-j"}
-	if page > 0 {
-		args = append(args, "-f", strconv.Itoa(page), "-l", strconv.Itoa(page))
-	}
-	args = append(args, path, prefix)
+	// Extraction stops at the last page that holds a selected picture, so a
+	// long document does not have every image written to disk for ten of
+	// them. The first page is the listing's, which keeps pdfimages' image
+	// numbers the same in both runs.
+	lastPage := selected[len(selected)-1].page
+	extractArgs := append([]string{"-png"}, firstPageArgs...)
+	extractArgs = append(extractArgs, "-l", strconv.Itoa(lastPage), path, prefix)
 
-	if _, err := runTool(ctx, toolTimeout, nil, path, r.pdfimagesBin, args...); err != nil {
+	if _, err := runTool(ctx, toolTimeout, nil, path, r.pdfimagesBin, extractArgs...); err != nil {
 		return nil, err
 	}
 
-	// List the extracted images using pdfimages -list for metadata
-	listArgs := []string{"-list"}
-	if page > 0 {
-		listArgs = append(listArgs, "-f", strconv.Itoa(page), "-l", strconv.Itoa(page))
-	}
-	listArgs = append(listArgs, path)
+	budgetUsed := 0
 
-	// The list only adds page and size; a failure leaves them empty, but a
-	// deadline still stops the call.
-	listOut, err := runTool(ctx, toolTimeout, nil, path, r.pdfimagesBin, listArgs...)
-	if isContextError(err) {
-		return nil, err
-	}
+	for _, picture := range selected {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 
-	// Parse the list output for page/width/height info
-	type imgMeta struct {
-		page   int
-		width  int
-		height int
-	}
-	var metas []imgMeta
-	lines := strings.Split(listOut, "\n")
-	for i, line := range lines {
-		if i < 2 { // skip header lines
+		info, err := preparePNG(fmt.Sprintf("%s-%03d.png", prefix, picture.number), picture)
+		if err != nil {
+			extraction.Notes = append(extraction.Notes, fmt.Sprintf("image %d on page %d was left out: %v", picture.number, picture.page, err))
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
-		}
-		p, _ := strconv.Atoi(fields[0])
-		w, _ := strconv.Atoi(fields[3])
-		h, _ := strconv.Atoi(fields[4])
-		metas = append(metas, imgMeta{page: p, width: w, height: h})
-	}
 
-	// Read extracted image files
-	entries, err := os.ReadDir(tmpDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read temp dir: %w", withoutPath(err))
-	}
-
-	var images []ImageInfo
-	maxImages := 10
-
-	for i, entry := range entries {
-		if entry.IsDir() || i >= maxImages {
+		if budgetUsed+len(info.DataBase64) > ImageBudgetBytes {
+			extraction.Notes = append(extraction.Notes, fmt.Sprintf("stopped at the %d MB image budget after %d images; ask for one page with page to see the rest", ImageBudgetBytes>>20, len(extraction.Images)))
 			break
 		}
 
-		imgPath := filepath.Join(tmpDir, entry.Name())
-		data, err := os.ReadFile(imgPath)
-		if err != nil {
-			continue
-		}
-
-		// Determine format from extension
-		ext := strings.TrimPrefix(filepath.Ext(entry.Name()), ".")
-		if ext == "jpg" {
-			ext = "jpeg"
-		}
-
-		img := ImageInfo{
-			Index:      i,
-			Format:     ext,
-			DataBase64: base64.StdEncoding.EncodeToString(data),
-		}
-
-		// Attach metadata if available
-		if i < len(metas) {
-			img.Page = metas[i].page
-			img.Width = metas[i].width
-			img.Height = metas[i].height
-		}
-
-		images = append(images, img)
+		budgetUsed += len(info.DataBase64)
+		extraction.Images = append(extraction.Images, info)
 	}
 
-	if len(images) == 0 {
-		return []ImageInfo{}, nil
+	return extraction, nil
+}
+
+// preparePNG reads the PNG pdfimages wrote for picture and returns it as an
+// ImageInfo, scaled to MaxImageSide on the longer side and shrunk further
+// while its base64 is over maxImageBytes. A PNG that is already small enough
+// goes out as pdfimages wrote it, without decoding.
+func preparePNG(filePath string, picture listedImage) (ImageInfo, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return ImageInfo{}, fmt.Errorf("pdfimages did not write it as PNG: %w", withoutPath(err))
 	}
 
-	return images, nil
+	config, err := png.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return ImageInfo{}, fmt.Errorf("unreadable PNG: %w", err)
+	}
+
+	info := ImageInfo{
+		Page:           picture.page,
+		Index:          picture.number,
+		Format:         "png",
+		MIMEType:       "image/png",
+		OriginalWidth:  config.Width,
+		OriginalHeight: config.Height,
+	}
+
+	width, height := scaledSize(config.Width, config.Height, MaxImageSide)
+	if width == config.Width && height == config.Height && base64.StdEncoding.EncodedLen(len(data)) <= maxImageBytes {
+		info.Width = width
+		info.Height = height
+		info.DataBase64 = base64.StdEncoding.EncodeToString(data)
+		return info, nil
+	}
+
+	if config.Width*config.Height > maxDecodePixels {
+		return ImageInfo{}, fmt.Errorf("%dx%d pixels is too large to decode", config.Width, config.Height)
+	}
+
+	decoded, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return ImageInfo{}, fmt.Errorf("unreadable PNG: %w", err)
+	}
+
+	// Every attempt scales the original again, a quarter smaller than the
+	// last, so the quality does not degrade from resampling a resample.
+	longest := max(width, height)
+
+	for longest >= minImageSide {
+		width, height = scaledSize(config.Width, config.Height, longest)
+
+		var encoded bytes.Buffer
+		if err := png.Encode(&encoded, boxResample(decoded, width, height)); err != nil {
+			return ImageInfo{}, fmt.Errorf("failed to encode PNG: %w", err)
+		}
+
+		if base64.StdEncoding.EncodedLen(encoded.Len()) <= maxImageBytes {
+			info.Width = width
+			info.Height = height
+			info.DataBase64 = base64.StdEncoding.EncodeToString(encoded.Bytes())
+			return info, nil
+		}
+
+		longest = longest * 3 / 4
+	}
+
+	return ImageInfo{}, fmt.Errorf("does not fit in %d MB even at %d px", maxImageBytes>>20, minImageSide)
+}
+
+// scaledSize returns width and height scaled so the longer side is at most
+// longest, keeping the aspect ratio. A size that already fits is returned
+// as it is, and neither side drops below one pixel.
+func scaledSize(width, height, longest int) (int, int) {
+	if width <= longest && height <= longest {
+		return width, height
+	}
+
+	if width >= height {
+		return longest, max(1, (height*longest+width/2)/width)
+	}
+
+	return max(1, (width*longest+height/2)/height), longest
+}
+
+// pixelPlane is the raw pixel memory of an image with one byte per channel:
+// the Pix and Stride of an image.Gray or image.RGBA, with its size.
+type pixelPlane struct {
+	pix    []uint8
+	stride int
+	width  int
+	height int
+}
+
+// boxResample scales source down to width by height with a box filter: each
+// target pixel is the average of the source pixels it covers, which keeps
+// thin lines and text that nearest-neighbour sampling would drop. A grey
+// source gives a grey image, so its PNG stays a third of the size; anything
+// else is averaged as premultiplied RGBA, which keeps the colour of
+// half-transparent edges right.
+func boxResample(source image.Image, width, height int) image.Image {
+	bounds := source.Bounds()
+
+	if gray, ok := source.(*image.Gray); ok {
+		target := image.NewGray(image.Rect(0, 0, width, height))
+		sourcePlane := pixelPlane{pix: gray.Pix[gray.PixOffset(bounds.Min.X, bounds.Min.Y):], stride: gray.Stride, width: bounds.Dx(), height: bounds.Dy()}
+		boxAverage(sourcePlane, pixelPlane{pix: target.Pix, stride: target.Stride, width: width, height: height}, 1)
+		return target
+	}
+
+	// image/draw converts any other model to RGBA with fast paths for the
+	// types the PNG decoder returns.
+	rgba, ok := source.(*image.RGBA)
+	if !ok {
+		rgba = image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+		draw.Draw(rgba, rgba.Bounds(), source, bounds.Min, draw.Src)
+		bounds = rgba.Bounds()
+	}
+
+	target := image.NewRGBA(image.Rect(0, 0, width, height))
+	sourcePlane := pixelPlane{pix: rgba.Pix[rgba.PixOffset(bounds.Min.X, bounds.Min.Y):], stride: rgba.Stride, width: bounds.Dx(), height: bounds.Dy()}
+	boxAverage(sourcePlane, pixelPlane{pix: target.Pix, stride: target.Stride, width: width, height: height}, 4)
+
+	return target
+}
+
+// boxAverage fills target with the rounded average of the block of source
+// pixels under each target pixel, channel by channel. It only scales down;
+// a block is at least one source pixel wide and tall.
+func boxAverage(source, target pixelPlane, channels int) {
+	// The column ranges are the same for every row, so they are worked out
+	// once.
+	columnStarts := make([]int, target.width+1)
+	for column := range columnStarts {
+		columnStarts[column] = column * source.width / target.width
+	}
+
+	sums := make([]uint64, channels)
+
+	for row := range target.height {
+		top := row * source.height / target.height
+		bottom := max((row+1)*source.height/target.height, top+1)
+
+		for column := range target.width {
+			left := columnStarts[column]
+			right := max(columnStarts[column+1], left+1)
+
+			clear(sums)
+			for y := top; y < bottom; y++ {
+				offset := y*source.stride + left*channels
+				for x := left; x < right; x++ {
+					for channel := range channels {
+						sums[channel] += uint64(source.pix[offset+channel])
+					}
+					offset += channels
+				}
+			}
+
+			count := uint64((bottom - top) * (right - left))
+			targetOffset := row*target.stride + column*channels
+			for channel := range channels {
+				target.pix[targetOffset+channel] = uint8((sums[channel] + count/2) / count)
+			}
+		}
+	}
 }
 
 // OutlineEntry represents a heading/section in a document outline.

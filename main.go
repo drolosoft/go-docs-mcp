@@ -464,7 +464,7 @@ func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerExtractImages(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("extract_images",
-		mcp.WithDescription("Extract embedded images from a PDF as base64-encoded data, up to 10 per call. Use this when you need to retrieve figures, charts, or photos embedded in a PDF document. Read-only."),
+		mcp.WithDescription(fmt.Sprintf("Extract the embedded images of a PDF as PNG image content, scaled to at most %d px on the longer side, %d per call by default and %d MB in total. Soft masks are not returned as images. Use this when you need to see figures, charts, or photos embedded in a PDF document. Read-only.", pdf.MaxImageSide, pdf.DefaultMaxImages, pdf.ImageBudgetBytes>>20)),
 		mcp.WithTitleAnnotation("Extract Images"),
 		readOnlyHints(false),
 		mcp.WithString("filename",
@@ -473,6 +473,12 @@ func registerExtractImages(s *server.MCPServer, reader *pdf.Reader) {
 		),
 		mcp.WithNumber("page",
 			mcp.Description("Optional page number to extract images from. If omitted, extracts from all pages."),
+		),
+		mcp.WithInteger("max_images",
+			mcp.Description(fmt.Sprintf("Maximum images to return (default %d, at most %d). The description counts every image found.", pdf.DefaultMaxImages, pdf.MaxImagesLimit)),
+			mcp.Min(1),
+			mcp.Max(pdf.MaxImagesLimit),
+			mcp.DefaultNumber(pdf.DefaultMaxImages),
 		),
 	)
 
@@ -483,18 +489,19 @@ func registerExtractImages(s *server.MCPServer, reader *pdf.Reader) {
 		}
 
 		page := request.GetInt("page", 0)
+		maxImages := request.GetInt("max_images", pdf.DefaultMaxImages)
 
-		images, err := reader.ExtractImages(ctx, filename, page)
+		extraction, err := reader.ExtractImages(ctx, filename, page, maxImages)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error extracting images: %v", err)), nil
 		}
 
-		data, err := json.MarshalIndent(images, "", "  ")
+		result, err := imagesResult(extraction)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling images: %v", err)), nil
 		}
 
-		return mcp.NewToolResultText(string(data)), nil
+		return result, nil
 	})
 }
 
