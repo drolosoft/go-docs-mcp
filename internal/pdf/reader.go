@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -700,14 +701,38 @@ func isTextEmpty(text string, pageCount int) bool {
 	return nonWS < threshold
 }
 
+// defaultOCRLanguage is the tesseract language when neither the call nor
+// DOCS_MCP_OCR_LANG names one; English ships with every tesseract install.
+const defaultOCRLanguage = "eng"
+
+// ocrLanguagePattern is what a tesseract language may look like: lowercase
+// codes such as spa or chi_sim, joined with + to combine several. It keeps an
+// option, a path or anything else out of tesseract's -l argument.
+var ocrLanguagePattern = regexp.MustCompile(`^[a-z_+]{3,20}$`)
+
+// ocrLanguage picks the OCR language for a call: the call's own language,
+// then DOCS_MCP_OCR_LANG, then English, and refuses one that does not match
+// ocrLanguagePattern with an error that says what is accepted.
+func ocrLanguage(requested string) (string, error) {
+	language := strings.TrimSpace(requested)
+	if language == "" {
+		language = strings.TrimSpace(os.Getenv("DOCS_MCP_OCR_LANG"))
+	}
+	if language == "" {
+		language = defaultOCRLanguage
+	}
+
+	if !ocrLanguagePattern.MatchString(language) {
+		return "", fmt.Errorf("invalid OCR language %q: use tesseract codes such as eng, spa or eng+spa (lowercase letters, _ and +, 3 to 20 characters)", language)
+	}
+
+	return language, nil
+}
+
 // ocrPage runs OCR on a single page of a PDF using pdftoppm + tesseract.
 // Uses TIFF format with temp files, piping the TIFF data via stdin to tesseract
 // to work around leptonica file-open bugs on macOS.
 func (r *Reader) ocrPage(ctx context.Context, path string, page int, language string) (string, error) {
-	if language == "" {
-		language = "eng"
-	}
-
 	// One deadline covers rendering and recognising the page.
 	pageCtx, cancel := context.WithTimeout(ctx, ocrPageTimeout)
 	defer cancel()
@@ -819,6 +844,11 @@ func (r *Reader) OCRDocument(ctx context.Context, filename string, page int, lan
 		return "", err
 	}
 
+	language, err = ocrLanguage(language)
+	if err != nil {
+		return "", err
+	}
+
 	path, err := r.resolveDocument(safe)
 	if err != nil {
 		return "", err
@@ -855,7 +885,14 @@ func (r *Reader) readWithOCRFallback(ctx context.Context, path string, firstPage
 		return text, "pdftotext (empty, no OCR available)", nil
 	}
 
-	ocrText, ocrErr := r.ocrPages(ctx, path, firstPage, lastPage, "eng")
+	// The fallback has no language parameter of its own, so it follows
+	// DOCS_MCP_OCR_LANG and then English.
+	language, err := ocrLanguage("")
+	if err != nil {
+		return "", "", err
+	}
+
+	ocrText, ocrErr := r.ocrPages(ctx, path, firstPage, lastPage, language)
 
 	// A deadline, a cancellation or a scan too long for one call is the
 	// caller's answer, not a reason to fall back to the empty pdftotext text.
@@ -1190,6 +1227,11 @@ func (r *Reader) ReadImage(ctx context.Context, filename string, language string
 		return "", err
 	}
 
+	language, err = ocrLanguage(language)
+	if err != nil {
+		return "", err
+	}
+
 	path, err := r.resolveDocument(safe)
 	if err != nil {
 		return "", err
@@ -1197,10 +1239,6 @@ func (r *Reader) ReadImage(ctx context.Context, filename string, language string
 
 	if _, err := exec.LookPath(r.tesseractBin); err != nil {
 		return "", fmt.Errorf("tesseract not available: install with 'brew install tesseract'")
-	}
-
-	if language == "" {
-		language = "eng"
 	}
 
 	// Open image and pipe to tesseract via stdin

@@ -1689,3 +1689,98 @@ func TestClampPageRanges(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 24. OCR language
+// ---------------------------------------------------------------------------
+
+func TestOCRLanguage(t *testing.T) {
+	tests := []struct {
+		name        string
+		requested   string
+		environment string
+		want        string
+		wantErr     bool
+	}{
+		{"default", "", "", "eng", false},
+		{"environment", "", "spa", "spa", false},
+		{"call wins over environment", "fra", "spa", "fra", false},
+		{"several languages", "eng+spa", "", "eng+spa", false},
+		{"script variant", "chi_sim", "", "chi_sim", false},
+		{"uppercase", "ENG", "", "", true},
+		{"too short", "en", "", "", true},
+		{"too long", "eng+spa+fra+deu+ita+por", "", "", true},
+		{"option injection", "-l eng", "", "", true},
+		{"path", "../eng", "", "", true},
+		{"shell", "eng;rm", "", "", true},
+		{"invalid environment", "", "Spanish!", "", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DOCS_MCP_OCR_LANG", tc.environment)
+
+			got, err := ocrLanguage(tc.requested)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "invalid OCR language") {
+					t.Fatalf("ocrLanguage(%q): want an 'invalid OCR language' error, got %q, %v", tc.requested, got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ocrLanguage(%q): %v", tc.requested, err)
+			}
+			if got != tc.want {
+				t.Errorf("ocrLanguage(%q) = %q, want %q", tc.requested, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOCR_InvalidLanguageNeverReachesTesseract(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "scan.pdf", "%PDF-1.4 never parsed by the fakes")
+	writeFile(t, dir, "photo.png", "not really a png")
+
+	log := newInvocationLog(t)
+	useFakeOCR(t, r, log, "should never be used")
+
+	_, err := r.OCRDocument(t.Context(), "scan.pdf", 1, "eng -c tessedit_write_images=1")
+	if err == nil || !strings.Contains(err.Error(), "invalid OCR language") {
+		t.Errorf("OCRDocument with a bad language: want 'invalid OCR language', got %v", err)
+	}
+
+	_, err = r.ReadImage(t.Context(), "photo.png", "../../eng")
+	if err == nil || !strings.Contains(err.Error(), "invalid OCR language") {
+		t.Errorf("ReadImage with a bad language: want 'invalid OCR language', got %v", err)
+	}
+
+	if runs := log.count(t, "tesseract") + log.count(t, "pdftoppm"); runs != 0 {
+		t.Errorf("OCR binaries ran %d times for a refused language, want 0", runs)
+	}
+}
+
+func TestOCR_FallbackUsesEnvironmentLanguage(t *testing.T) {
+	t.Setenv("DOCS_MCP_OCR_LANG", "spa")
+
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "scan.pdf", "%PDF-1.4 never parsed by the fakes")
+
+	log := newInvocationLog(t)
+	useFakeOCR(t, r, log, "texto reconocido")
+	bin := t.TempDir()
+	r.pdfinfoBin = writeFakeBinary(t, bin, "pdfinfo", "echo 'Pages:          1'\n")
+	r.pdftotextBin = writeFakeBinary(t, bin, "pdftotext", "")
+
+	if _, err := r.ReadDocument(t.Context(), "scan.pdf", 0); err != nil {
+		t.Fatalf("ReadDocument on a scan: %v", err)
+	}
+
+	data, err := os.ReadFile(log.path)
+	if err != nil {
+		t.Fatalf("failed to read invocation log: %v", err)
+	}
+	if !strings.Contains(string(data), "tesseract stdin stdout -l spa") {
+		t.Errorf("the OCR fallback should use DOCS_MCP_OCR_LANG=spa, tesseract ran as:\n%s", data)
+	}
+}
