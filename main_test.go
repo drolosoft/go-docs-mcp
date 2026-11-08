@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -361,5 +362,57 @@ func TestDownloadRejectsPrivateAddressAtDial(t *testing.T) {
 	}
 	if hits.Load() != 0 {
 		t.Fatalf("the server was contacted %d times", hits.Load())
+	}
+}
+
+func TestToolErrorsHideAbsolutePaths(t *testing.T) {
+	// A documents directory that does not exist makes list_documents fail
+	// with the reader's message, which names the directory in full.
+	docsDir := filepath.Join(t.TempDir(), "missing-documents")
+	mcpServer := newServer(pdf.NewReader(docsDir), docsDir)
+
+	data := handle(t, mcpServer, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_documents","arguments":{}}}`)
+
+	if !strings.Contains(string(data), `"isError":true`) {
+		t.Fatalf("list_documents did not fail: %s", data)
+	}
+	if strings.Contains(string(data), docsDir) {
+		t.Fatalf("the error reveals the documents directory: %s", data)
+	}
+	if !strings.Contains(string(data), "missing-documents") {
+		t.Fatalf("the error lost the directory's name: %s", data)
+	}
+}
+
+func TestRedactPaths(t *testing.T) {
+	docsDir := "/Users/someone/.docs-mcp/documents"
+	tempDir := "/var/folders/xy/T/"
+
+	cases := []struct {
+		message string
+		want    string
+	}{
+		{
+			"cannot read documents directory /Users/someone/.docs-mcp/documents: open /Users/someone/.docs-mcp/documents: no such file or directory",
+			"cannot read documents directory documents: open documents: no such file or directory",
+		},
+		{
+			"failed to read file: open /Users/someone/.docs-mcp/documents/report.pdf: permission denied",
+			"failed to read file: open report.pdf: permission denied",
+		},
+		{
+			"file not found: /var/folders/xy/T/go-docs-mcp-123.pdf",
+			"file not found: go-docs-mcp-123.pdf",
+		},
+		{
+			`failed to download document: Get "https://example.com/a.pdf": timeout`,
+			`failed to download document: Get "https://example.com/a.pdf": timeout`,
+		},
+	}
+
+	for _, c := range cases {
+		if got := redactPaths(c.message, docsDir, tempDir); got != c.want {
+			t.Errorf("redactPaths(%q)\n got %q\nwant %q", c.message, got, c.want)
+		}
 	}
 }

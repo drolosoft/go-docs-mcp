@@ -121,6 +121,7 @@ func newServer(reader *pdf.Reader, docsDir string) *server.MCPServer {
 		"go-docs-mcp",
 		serverVersion(),
 		server.WithToolCapabilities(true),
+		server.WithToolHandlerMiddleware(redactPathsMiddleware(docsDir, os.TempDir())),
 	)
 
 	// Register tools (13 total, 12 when read_url is disabled)
@@ -155,6 +156,79 @@ func readOnlyHints(openWorld bool) mcp.ToolOption {
 		mcp.WithIdempotentHintAnnotation(true)(tool)
 		mcp.WithOpenWorldHintAnnotation(openWorld)(tool)
 	}
+}
+
+// redactPathsMiddleware rewrites the text of failed tool results so a path
+// under one of roots reaches the client as its file name only. The reader's
+// errors wrap os errors that carry full paths (the documents directory, the
+// temporary files of read_url and pdfimages), and those reveal the user's
+// home and layout to the model and whatever it talks to.
+func redactPathsMiddleware(roots ...string) server.ToolHandlerMiddleware {
+	return func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			result, err := next(ctx, request)
+			if result == nil || !result.IsError {
+				return result, err
+			}
+
+			for index, content := range result.Content {
+				if text, ok := content.(mcp.TextContent); ok {
+					text.Text = redactPaths(text.Text, roots...)
+					result.Content[index] = text
+				}
+			}
+
+			return result, err
+		}
+	}
+}
+
+// pathTerminators are the characters that end a path inside an error
+// message: Go's os errors put a colon after it, net/http quotes it, and a
+// space or a comma ends a sentence.
+const pathTerminators = " \t\n:\"',;)"
+
+// redactPaths replaces every path in message that starts with one of roots by
+// its last element: "/home/ana/docs/report.pdf" becomes "report.pdf" and the
+// root itself becomes "docs". A match must end at a path boundary, so a root
+// "/tmp/a" leaves "/tmp/ab" alone.
+func redactPaths(message string, roots ...string) string {
+	for _, root := range roots {
+		root = strings.TrimRight(root, string(filepath.Separator))
+		if root == "" {
+			continue
+		}
+
+		var redacted strings.Builder
+		rest := message
+
+		for {
+			index := strings.Index(rest, root)
+			if index < 0 {
+				redacted.WriteString(rest)
+				break
+			}
+
+			end := index + len(root)
+			if end < len(rest) && rest[end] != filepath.Separator && !strings.ContainsRune(pathTerminators, rune(rest[end])) {
+				redacted.WriteString(rest[:end])
+				rest = rest[end:]
+				continue
+			}
+
+			for end < len(rest) && !strings.ContainsRune(pathTerminators, rune(rest[end])) {
+				end++
+			}
+
+			redacted.WriteString(rest[:index])
+			redacted.WriteString(filepath.Base(rest[index:end]))
+			rest = rest[end:]
+		}
+
+		message = redacted.String()
+	}
+
+	return message
 }
 
 func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
