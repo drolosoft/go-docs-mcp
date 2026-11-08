@@ -822,7 +822,8 @@ func (r *Reader) ocrDocument(ctx context.Context, path string, page int, languag
 // ocrPages runs OCR on pages firstPage to lastPage under one ocrCallTimeout.
 // A page that fails is noted in the text and the next one is tried; a
 // deadline or a cancellation stops the loop, because every later page would
-// fail the same way. A single page returns its error as it is.
+// fail the same way. A single page returns its error as it is. Several pages
+// come back joined by joinOCRPages, one form feed after each.
 func (r *Reader) ocrPages(ctx context.Context, path string, firstPage, lastPage int, language string) (string, error) {
 	pages := lastPage - firstPage + 1
 	if pages > maxPagesPerCall {
@@ -836,23 +837,47 @@ func (r *Reader) ocrPages(ctx context.Context, path string, firstPage, lastPage 
 		return r.ocrPage(ocrCtx, path, firstPage, language)
 	}
 
-	var parts []string
+	var pageTexts []string
 	for page := firstPage; page <= lastPage; page++ {
 		text, err := r.ocrPage(ocrCtx, path, page, language)
 		if isContextError(err) {
 			return "", err
 		}
+
+		// A failed page keeps its place, so the pages after it are still
+		// counted right.
 		if err != nil {
-			parts = append(parts, fmt.Sprintf("[OCR failed on page %d: %v]", page, err))
+			pageTexts = append(pageTexts, fmt.Sprintf("[OCR failed on page %d: %v]", page, err))
 			continue
 		}
-		if page > firstPage {
-			parts = append(parts, fmt.Sprintf("\n--- Page %d ---\n", page))
-		}
-		parts = append(parts, text)
+		pageTexts = append(pageTexts, text)
 	}
 
-	return strings.Join(parts, ""), nil
+	return joinOCRPages(pageTexts), nil
+}
+
+// ocrPageBreak ends the text of every recognised page. It is the form feed
+// pdftotext writes after each page, so SearchDocument, the outline and the
+// table detector count the pages of a scan as they count those of a text PDF.
+const ocrPageBreak = "\f"
+
+// joinOCRPages joins the text recognised on consecutive pages the way
+// pdftotext lays out a document: each page ends with a newline and then
+// ocrPageBreak. The newline matters because a page is counted on the line
+// that carries the form feed; without it the last line of one page would
+// be reported on the next.
+func joinOCRPages(pages []string) string {
+	var joined strings.Builder
+
+	for _, text := range pages {
+		joined.WriteString(text)
+		if !strings.HasSuffix(text, "\n") {
+			joined.WriteString("\n")
+		}
+		joined.WriteString(ocrPageBreak)
+	}
+
+	return joined.String()
 }
 
 // errOCRNeedsPDF is returned when ocr_document is asked for a file that is

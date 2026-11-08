@@ -1927,3 +1927,52 @@ func TestOCRDocument_RejectsNonPDFFiles(t *testing.T) {
 		t.Errorf("OCR binaries ran %d times for files that are not PDFs, want 0", runs)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 28. Page markers in OCR text
+// ---------------------------------------------------------------------------
+
+func TestJoinOCRPages_EndsEveryPageWithAFormFeed(t *testing.T) {
+	// pdftotext ends every page with "\n\f"; OCR text must look the same so
+	// that search, outlines and tables count pages the same way. A page
+	// whose text has no final newline still gets one before the marker.
+	got := joinOCRPages([]string{"first page\n", "second page", "[OCR failed on page 3: boom]"})
+
+	want := "first page\n\fsecond page\n\f[OCR failed on page 3: boom]\n\f"
+	if got != want {
+		t.Errorf("joinOCRPages = %q, want %q", got, want)
+	}
+}
+
+// useFakePagedOCR points the reader at a pdftoppm that writes the page
+// number into its TIFF and a tesseract that prints what it reads, so every
+// page of a fake scan "recognises" as its own text.
+func useFakePagedOCR(t *testing.T, r *Reader, pageCount int) {
+	t.Helper()
+	bin := t.TempDir()
+
+	r.pdfinfoBin = writeFakeBinary(t, bin, "pdfinfo", fmt.Sprintf("echo 'Pages:          %d'\n", pageCount))
+	r.pdftotextBin = writeFakeBinary(t, bin, "pdftotext", "")
+	r.pdftoppmBin = writeFakeBinary(t, bin, "pdftoppm",
+		"for arg; do prefix=$arg; done\n"+
+			"while [ $# -gt 0 ]; do if [ \"$1\" = -f ]; then page=$2; fi; shift; done\n"+
+			"if [ \"$page\" = 2 ]; then word=needle; else word=hay; fi\n"+
+			"printf 'Scanned page %s line one\\nscanned page %s with %s\\n' \"$page\" \"$page\" \"$word\" > \"$prefix.tif\"\n")
+	r.tesseractBin = writeFakeBinary(t, bin, "tesseract", "cat\n")
+	r.hasOCR = true
+}
+
+func TestSearchDocument_OCRTextReportsTheRightPage(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "scan.pdf", "%PDF-1.4 never parsed by the fakes")
+	useFakePagedOCR(t, r, 3)
+
+	got, err := r.SearchDocument(t.Context(), "scan.pdf", "needle")
+	if err != nil {
+		t.Fatalf("SearchDocument on a scanned PDF: %v", err)
+	}
+
+	if !strings.Contains(got, "Found 1 matches") || !strings.Contains(got, "page ~2") {
+		t.Errorf("want one match reported on page 2, got:\n%s", got)
+	}
+}
