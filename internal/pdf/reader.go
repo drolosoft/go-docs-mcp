@@ -1,11 +1,17 @@
 package pdf
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,42 +59,129 @@ type cacheEntry struct {
 // Reader handles PDF text extraction via pdftotext with in-memory caching.
 // Supports automatic OCR fallback for image-based PDFs using tesseract.
 type Reader struct {
-	docsDir       string
-	pdftotextBin  string
-	pdfinfoBin    string
-	pdfimagesBin  string
-	pdftoppmBin   string
-	tesseractBin  string
-	hasOCR        bool // true if both pdftoppm and tesseract are available
+	docsDir      string
+	pdftotextBin string
+	pdfinfoBin   string
+	pdfimagesBin string
+	pdftoppmBin  string
+	tesseractBin string
+	pandocBin    string
+	hasOCR       bool // true if both pdftoppm and tesseract are available
 
 	mu    sync.RWMutex
 	cache map[string]*cacheEntry
 }
 
+// toolTimeout bounds one run of pdftotext, pdfinfo, pdfimages or pandoc. A
+// healthy run takes seconds even on a long document; a minute leaves room for
+// very large files and still stops a binary stuck on a malformed one.
+const toolTimeout = 60 * time.Second
+
+// ocrPageTimeout bounds the OCR of one page, pdftoppm and tesseract together.
+// Rendering a page at 200 dpi and recognising it takes a few seconds; two
+// minutes covers slow machines and oversized pages.
+const ocrPageTimeout = 120 * time.Second
+
+// ocrCallTimeout bounds all the OCR a single call may do. Pages are
+// recognised one after another, so a long scan would otherwise keep the tool
+// busy for an hour; ten minutes is about what an MCP client will wait.
+const ocrCallTimeout = 10 * time.Minute
+
+// commandWaitDelay is how long Wait keeps waiting for the output pipes of a
+// killed command. A wrapper script can leave a child holding stdout after the
+// kill; two seconds lets real output drain without hanging on that child.
+const commandWaitDelay = 2 * time.Second
+
+// stderrLimit is how much of a tool's stderr goes into an error. The first
+// kilobyte holds the actual complaint; poppler can repeat a warning for every
+// broken object and would flood the tool result otherwise.
+const stderrLimit = 1024
+
+// runTool runs an external binary bound to ctx and to its own timeout, and
+// returns what it wrote to stdout, also when it fails. stdin may be nil. The
+// error names the tool, wraps the context error when a deadline or a
+// cancellation stopped it, and carries the start of its stderr with
+// documentPath reduced to the file name.
+func runTool(ctx context.Context, timeout time.Duration, stdin io.Reader, documentPath, binary string, args ...string) (string, error) {
+	toolCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(toolCtx, binary, args...)
+	cmd.WaitDelay = commandWaitDelay
+	cmd.Stdin = stdin
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err == nil {
+		return stdout.String(), nil
+	}
+
+	tool := filepath.Base(binary)
+
+	// A killed process only says "signal: killed"; the context says why.
+	if contextErr := toolCtx.Err(); contextErr != nil {
+		return stdout.String(), fmt.Errorf("%s did not finish: %w", tool, contextErr)
+	}
+
+	detail := boundedStderr(stderr.String(), documentPath)
+	if detail == "" {
+		return stdout.String(), fmt.Errorf("%s failed: %w", tool, err)
+	}
+	return stdout.String(), fmt.Errorf("%s failed: %w (stderr: %s)", tool, err, detail)
+}
+
+// boundedStderr prepares a tool's stderr for an error message: the document
+// path becomes its file name, so the message never shows where the documents
+// live, and the text is cut to stderrLimit bytes without splitting a rune.
+func boundedStderr(stderr, documentPath string) string {
+	if documentPath != "" {
+		stderr = strings.ReplaceAll(stderr, documentPath, filepath.Base(documentPath))
+	}
+
+	stderr = strings.TrimSpace(stderr)
+	if len(stderr) <= stderrLimit {
+		return stderr
+	}
+
+	return strings.ToValidUTF8(stderr[:stderrLimit], "") + " [truncated]"
+}
+
+// isContextError reports whether err comes from a deadline or a cancellation.
+// Those stop the work outright, where a failed OCR page is noted and skipped.
+func isContextError(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+// binaryDirs are the directories searched for a binary before PATH. An MCP
+// client often starts the server with a bare PATH that misses Homebrew,
+// which installs into /opt/homebrew/bin on Apple silicon and /usr/local/bin
+// on Intel Macs.
+var binaryDirs = []string{"/opt/homebrew/bin", "/usr/local/bin"}
+
+// findBinary returns the path of name in the first of dirs that holds it, or
+// the bare name so that exec looks it up in PATH.
+func findBinary(name string, dirs []string) string {
+	for _, dir := range dirs {
+		candidate := filepath.Join(dir, name)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return name
+}
+
 // NewReader creates a new PDF reader for the given documents directory.
 func NewReader(docsDir string) *Reader {
-	pdftotextBin := "pdftotext"
-	pdfinfoBin := "pdfinfo"
-	pdfimagesBin := "pdfimages"
-	pdftoppmBin := "pdftoppm"
-	tesseractBin := "tesseract"
-
-	// Check for Homebrew installation on macOS
-	if _, err := os.Stat("/opt/homebrew/bin/pdftotext"); err == nil {
-		pdftotextBin = "/opt/homebrew/bin/pdftotext"
-	}
-	if _, err := os.Stat("/opt/homebrew/bin/pdfinfo"); err == nil {
-		pdfinfoBin = "/opt/homebrew/bin/pdfinfo"
-	}
-	if _, err := os.Stat("/opt/homebrew/bin/pdfimages"); err == nil {
-		pdfimagesBin = "/opt/homebrew/bin/pdfimages"
-	}
-	if _, err := os.Stat("/opt/homebrew/bin/pdftoppm"); err == nil {
-		pdftoppmBin = "/opt/homebrew/bin/pdftoppm"
-	}
-	if _, err := os.Stat("/opt/homebrew/bin/tesseract"); err == nil {
-		tesseractBin = "/opt/homebrew/bin/tesseract"
-	}
+	pdftotextBin := findBinary("pdftotext", binaryDirs)
+	pdfinfoBin := findBinary("pdfinfo", binaryDirs)
+	pdfimagesBin := findBinary("pdfimages", binaryDirs)
+	pdftoppmBin := findBinary("pdftoppm", binaryDirs)
+	tesseractBin := findBinary("tesseract", binaryDirs)
+	pandocBin := findBinary("pandoc", binaryDirs)
 
 	// Determine OCR availability
 	_, errPdftoppm := exec.LookPath(pdftoppmBin)
@@ -102,6 +195,7 @@ func NewReader(docsDir string) *Reader {
 		pdfimagesBin: pdfimagesBin,
 		pdftoppmBin:  pdftoppmBin,
 		tesseractBin: tesseractBin,
+		pandocBin:    pandocBin,
 		hasOCR:       hasOCR,
 		cache:        make(map[string]*cacheEntry),
 	}
@@ -171,33 +265,33 @@ const summaryLines = 100
 func readTextFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("failed to read file: %w", err)
+		return "", fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 	return string(data), nil
 }
 
 // readDocx converts a .docx to plain text with pandoc.
-func readDocx(path string) (string, error) {
-	if _, err := exec.LookPath("pandoc"); err != nil {
+func (r *Reader) readDocx(ctx context.Context, path string) (string, error) {
+	if _, err := exec.LookPath(r.pandocBin); err != nil {
 		return "", fmt.Errorf("reading .docx requires pandoc (install pandoc and retry)")
 	}
-	out, err := exec.Command("pandoc", "-t", "plain", "--wrap=none", path).Output()
+	out, err := runTool(ctx, toolTimeout, nil, path, r.pandocBin, "-t", "plain", "--wrap=none", path)
 	if err != nil {
-		return "", fmt.Errorf("pandoc failed: %w", err)
+		return "", err
 	}
-	return string(out), nil
+	return out, nil
 }
 
 // extractText dispatches full-text extraction by format: text files verbatim,
 // .docx via pandoc, PDFs via pdftotext with OCR fallback.
-func (r *Reader) extractText(filename, path string) (string, error) {
+func (r *Reader) extractText(ctx context.Context, filename, path string) (string, error) {
 	switch {
 	case isTextFormat(filename):
 		return readTextFile(path)
 	case strings.ToLower(filepath.Ext(filename)) == ".docx":
-		return readDocx(path)
+		return r.readDocx(ctx, path)
 	default:
-		text, _, err := r.readWithOCRFallback(path, 0, 0)
+		text, _, err := r.readWithOCRFallback(ctx, path, 0, 0)
 		return text, err
 	}
 }
@@ -242,11 +336,59 @@ func (r *Reader) fullPath(filename string) string {
 	return filepath.Join(r.docsDir, filename)
 }
 
+// withoutPath drops the absolute path that an os error carries and keeps the
+// operation and the cause, "open: permission denied" for instance, so a tool
+// result names the file but never shows where the documents live on disk.
+// errors.Is still sees the cause.
+func withoutPath(err error) error {
+	var pathError *fs.PathError
+	if errors.As(err, &pathError) {
+		return fmt.Errorf("%s: %w", pathError.Op, pathError.Err)
+	}
+	return err
+}
+
+// errOutsideDocsDir is returned when a name inside the documents directory
+// resolves, through a symlink, to a file that lives somewhere else.
+var errOutsideDocsDir = errors.New("resolves outside the documents directory")
+
+// resolveDocument returns the real path of a sanitized filename. It follows
+// symlinks, because pdftotext, tesseract and pandoc open the path themselves,
+// and refuses any result that leaves the documents directory: a link called
+// innocent.txt must not hand out a file from elsewhere on the disk. A name
+// that does not exist, a dangling link included, is reported as not found.
+func (r *Reader) resolveDocument(safe string) (string, error) {
+	realDir, err := filepath.EvalSymlinks(r.docsDir)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve the documents directory: %w", withoutPath(err))
+	}
+
+	realPath, err := filepath.EvalSymlinks(r.fullPath(safe))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("document not found: %s", safe)
+	}
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve %s: %w", safe, withoutPath(err))
+	}
+
+	// Rel answers ".." or a "../" prefix exactly when the real path is not
+	// below the real directory; comparing string prefixes would accept a
+	// sibling such as /docs-other for /docs.
+	relative, err := filepath.Rel(realDir, realPath)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%s %w", safe, errOutsideDocsDir)
+	}
+
+	return realPath, nil
+}
+
 // ListDocuments returns metadata for all supported files in the documents directory.
-func (r *Reader) ListDocuments() ([]DocumentInfo, error) {
+func (r *Reader) ListDocuments(ctx context.Context) ([]DocumentInfo, error) {
 	entries, err := os.ReadDir(r.docsDir)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read documents directory %s: %w", r.docsDir, err)
+		// The folder's own name helps the user spot a typo in DOCS_MCP_DIR;
+		// the rest of the path stays out of the message.
+		return nil, fmt.Errorf("cannot read the documents directory %q: %w", filepath.Base(r.docsDir), withoutPath(err))
 	}
 
 	var docs []DocumentInfo
@@ -268,14 +410,21 @@ func (r *Reader) ListDocuments() ([]DocumentInfo, error) {
 			continue
 		}
 
-		info, err := entry.Info()
+		// A symlink that leaves the directory or points nowhere is left out
+		// of the listing instead of failing it, and the size is the one of
+		// the file the link reaches, not of the link itself.
+		path, err := r.resolveDocument(name)
 		if err != nil {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
 			continue
 		}
 
 		pages := 0
 		if ext == ".pdf" {
-			pages = r.getPageCount(filepath.Join(r.docsDir, name))
+			pages = r.getPageCount(ctx, path)
 		}
 		title := strings.TrimSuffix(name, filepath.Ext(name))
 
@@ -290,91 +439,96 @@ func (r *Reader) ListDocuments() ([]DocumentInfo, error) {
 	return docs, nil
 }
 
-// getPageCount uses pdfinfo to get the page count for a PDF file.
-func (r *Reader) getPageCount(path string) int {
-	cmd := exec.Command(r.pdfinfoBin, path)
-	out, err := cmd.Output()
+// getPageCount uses pdfinfo to get the page count for a PDF file, or 0 when
+// pdfinfo cannot tell.
+func (r *Reader) getPageCount(ctx context.Context, path string) int {
+	pages, err := r.pageCount(ctx, path)
 	if err != nil {
 		return 0
 	}
+	return pages
+}
 
-	for _, line := range strings.Split(string(out), "\n") {
+// pageCount asks pdfinfo how many pages a PDF has and says why when it
+// cannot, so a page range is never checked against a guess.
+func (r *Reader) pageCount(ctx context.Context, path string) (int, error) {
+	out, err := runTool(ctx, toolTimeout, nil, path, r.pdfinfoBin, path)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, "Pages:") {
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
 				n, err := strconv.Atoi(parts[1])
 				if err == nil {
-					return n
+					return n, nil
 				}
 			}
 		}
 	}
-	return 0
+	return 0, fmt.Errorf("pdfinfo reported no page count for %s", filepath.Base(path))
 }
 
 // ReadDocument extracts text from a PDF file. If page > 0, only that page is returned.
 // Automatically falls back to OCR if pdftotext returns empty text.
-func (r *Reader) ReadDocument(filename string, page int) (string, error) {
+func (r *Reader) ReadDocument(ctx context.Context, filename string, page int) (string, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	if page > 0 {
 		if !isPDF(safe) {
 			return "", fmt.Errorf("page selection is only supported for PDF files; %s is %s — call without page/pages to read the whole document", safe, filepath.Ext(safe))
 		}
-		text, method, err := r.readWithOCRFallback(path, page, page)
-		if err != nil {
-			return "", err
-		}
-		_ = method // method info available for logging if needed
-		return text, nil
+		return r.readPageRanges(ctx, path, [][2]int{{page, page}})
 	}
 
-	return r.extractFull(safe, path)
+	return r.extractFull(ctx, safe, path)
 }
 
 // ReadDocumentPages extracts text from specific page ranges of a PDF file.
 // Supports ranges like "1-5", "10", "1-3,7,10-12".
-func (r *Reader) ReadDocumentPages(filename, pagesStr string) (string, error) {
+func (r *Reader) ReadDocumentPages(ctx context.Context, filename, pagesStr string) (string, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	if !isPDF(safe) {
 		return "", fmt.Errorf("page ranges are only supported for PDF files; %s is %s — call without page/pages to read the whole document", safe, filepath.Ext(safe))
 	}
-	return r.extractPageRanges(path, pagesStr)
+	return r.extractPageRanges(ctx, path, pagesStr)
 }
 
 // ReadFile extracts full text from an arbitrary PDF file path (used for URL downloads).
 // Automatically falls back to OCR if pdftotext returns empty text.
-func (r *Reader) ReadFile(path string) (string, error) {
+func (r *Reader) ReadFile(ctx context.Context, path string) (string, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("file not found: %s", path)
+		return "", fmt.Errorf("file not found: %s", filepath.Base(path))
 	}
-	text, _, err := r.readWithOCRFallback(path, 0, 0)
+	text, _, err := r.readWithOCRFallback(ctx, path, 0, 0)
 	return text, err
 }
 
 // ReadFilePages extracts text from specific page ranges of an arbitrary PDF file path.
-func (r *Reader) ReadFilePages(path, pagesStr string) (string, error) {
+func (r *Reader) ReadFilePages(ctx context.Context, path, pagesStr string) (string, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("file not found: %s", path)
+		return "", fmt.Errorf("file not found: %s", filepath.Base(path))
 	}
-	return r.extractPageRanges(path, pagesStr)
+	return r.extractPageRanges(ctx, path, pagesStr)
 }
 
 // parsePageRanges parses a page range string like "1-5,7,10-12" into a list of [first, last] pairs.
@@ -417,17 +571,75 @@ func parsePageRanges(pagesStr string) ([][2]int, error) {
 	return ranges, nil
 }
 
+// maxPagesPerCall caps the pages one read may cover. A scanned page costs two
+// processes and up to ocrPageTimeout, so a request for a thousand pages
+// would run for hours; two hundred is a long chapter, and a client that
+// wants more can ask in several calls.
+const maxPagesPerCall = 200
+
+// errTooManyPages marks a request over maxPagesPerCall, so the OCR fallback
+// can report it instead of quietly returning the empty pdftotext text.
+var errTooManyPages = errors.New("too many pages for one call")
+
+// clampPageRanges fits the requested ranges to the pages the document really
+// has: a range that runs past the end stops at the last page and one that
+// starts after it is an error. The pages left are capped at maxPagesPerCall.
+// Without this, "1-60" on a one-page PDF looked like sixty empty pages and
+// started sixty OCR runs.
+func clampPageRanges(ranges [][2]int, pageCount int) ([][2]int, error) {
+	var clamped [][2]int
+	total := 0
+
+	for _, pageRange := range ranges {
+		first := pageRange[0]
+		last := pageRange[1]
+		if first > pageCount {
+			return nil, fmt.Errorf("page %d does not exist: the document has %d page(s)", first, pageCount)
+		}
+		if last > pageCount {
+			last = pageCount
+		}
+
+		total += last - first + 1
+		clamped = append(clamped, [2]int{first, last})
+	}
+
+	if total > maxPagesPerCall {
+		return nil, fmt.Errorf("%w: a call can read at most %d pages and this one asks for %d, split it into several calls", errTooManyPages, maxPagesPerCall, total)
+	}
+
+	return clamped, nil
+}
+
 // extractPageRanges extracts text from multiple page ranges and combines the results.
 // Falls back to OCR if pdftotext returns empty text.
-func (r *Reader) extractPageRanges(path, pagesStr string) (string, error) {
+func (r *Reader) extractPageRanges(ctx context.Context, path, pagesStr string) (string, error) {
 	ranges, err := parsePageRanges(pagesStr)
+	if err != nil {
+		return "", err
+	}
+
+	return r.readPageRanges(ctx, path, ranges)
+}
+
+// readPageRanges checks parsed ranges against the page count pdfinfo gives,
+// then extracts each one with the OCR fallback. The real count, not the
+// request, decides how many pages are read and how much text a range needs
+// before it counts as scanned.
+func (r *Reader) readPageRanges(ctx context.Context, path string, ranges [][2]int) (string, error) {
+	pageCount, err := r.pageCount(ctx, path)
+	if err != nil {
+		return "", err
+	}
+
+	ranges, err = clampPageRanges(ranges, pageCount)
 	if err != nil {
 		return "", err
 	}
 
 	var parts []string
 	for _, rng := range ranges {
-		text, _, err := r.readWithOCRFallback(path, rng[0], rng[1])
+		text, _, err := r.readWithOCRFallback(ctx, path, rng[0], rng[1])
 		if err != nil {
 			return "", fmt.Errorf("error extracting pages %d-%d: %w", rng[0], rng[1], err)
 		}
@@ -439,10 +651,10 @@ func (r *Reader) extractPageRanges(path, pagesStr string) (string, error) {
 
 // extractFull extracts the full text of a PDF, using cache when possible.
 // Falls back to OCR if pdftotext returns empty text.
-func (r *Reader) extractFull(filename, path string) (string, error) {
+func (r *Reader) extractFull(ctx context.Context, filename, path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Errorf("cannot stat file: %w", err)
+		return "", fmt.Errorf("cannot stat file: %w", withoutPath(err))
 	}
 	mtime := info.ModTime()
 
@@ -455,7 +667,7 @@ func (r *Reader) extractFull(filename, path string) (string, error) {
 	r.mu.RUnlock()
 
 	// Extract by format (text verbatim, docx via pandoc, PDF via pdftotext + OCR fallback)
-	text, err := r.extractText(filename, path)
+	text, err := r.extractText(ctx, filename, path)
 	if err != nil {
 		return "", err
 	}
@@ -469,12 +681,12 @@ func (r *Reader) extractFull(filename, path string) (string, error) {
 }
 
 // extractPage extracts text from a specific page range.
-func (r *Reader) extractPage(path string, firstPage, lastPage int) (string, error) {
-	return r.runPdftotext(path, firstPage, lastPage)
+func (r *Reader) extractPage(ctx context.Context, path string, firstPage, lastPage int) (string, error) {
+	return r.runPdftotext(ctx, path, firstPage, lastPage)
 }
 
 // runPdftotext invokes pdftotext with the given options.
-func (r *Reader) runPdftotext(path string, firstPage, lastPage int) (string, error) {
+func (r *Reader) runPdftotext(ctx context.Context, path string, firstPage, lastPage int) (string, error) {
 	args := []string{"-layout"}
 	if firstPage > 0 {
 		args = append(args, "-f", strconv.Itoa(firstPage))
@@ -484,12 +696,11 @@ func (r *Reader) runPdftotext(path string, firstPage, lastPage int) (string, err
 	}
 	args = append(args, path, "-")
 
-	cmd := exec.Command(r.pdftotextBin, args...)
-	out, err := cmd.Output()
+	out, err := runTool(ctx, toolTimeout, nil, path, r.pdftotextBin, args...)
 	if err != nil {
-		return "", fmt.Errorf("pdftotext failed: %w", err)
+		return "", err
 	}
-	return string(out), nil
+	return out, nil
 }
 
 // isTextEmpty returns true if text has fewer than 50 non-whitespace characters
@@ -508,18 +719,46 @@ func isTextEmpty(text string, pageCount int) bool {
 	return nonWS < threshold
 }
 
+// defaultOCRLanguage is the tesseract language when neither the call nor
+// DOCS_MCP_OCR_LANG names one; English ships with every tesseract install.
+const defaultOCRLanguage = "eng"
+
+// ocrLanguagePattern is what a tesseract language may look like: lowercase
+// codes such as spa or chi_sim, joined with + to combine several. It keeps an
+// option, a path or anything else out of tesseract's -l argument.
+var ocrLanguagePattern = regexp.MustCompile(`^[a-z_+]{3,20}$`)
+
+// ocrLanguage picks the OCR language for a call: the call's own language,
+// then DOCS_MCP_OCR_LANG, then English, and refuses one that does not match
+// ocrLanguagePattern with an error that says what is accepted.
+func ocrLanguage(requested string) (string, error) {
+	language := strings.TrimSpace(requested)
+	if language == "" {
+		language = strings.TrimSpace(os.Getenv("DOCS_MCP_OCR_LANG"))
+	}
+	if language == "" {
+		language = defaultOCRLanguage
+	}
+
+	if !ocrLanguagePattern.MatchString(language) {
+		return "", fmt.Errorf("invalid OCR language %q: use tesseract codes such as eng, spa or eng+spa (lowercase letters, _ and +, 3 to 20 characters)", language)
+	}
+
+	return language, nil
+}
+
 // ocrPage runs OCR on a single page of a PDF using pdftoppm + tesseract.
 // Uses TIFF format with temp files, piping the TIFF data via stdin to tesseract
 // to work around leptonica file-open bugs on macOS.
-func (r *Reader) ocrPage(path string, page int, language string) (string, error) {
-	if language == "" {
-		language = "eng"
-	}
+func (r *Reader) ocrPage(ctx context.Context, path string, page int, language string) (string, error) {
+	// One deadline covers rendering and recognising the page.
+	pageCtx, cancel := context.WithTimeout(ctx, ocrPageTimeout)
+	defer cancel()
 
 	// Create temp dir for the TIFF file
 	tmpDir, err := os.MkdirTemp("", "go-docs-mcp-ocr-")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp dir: %w", err)
+		return "", fmt.Errorf("failed to create temp dir: %w", withoutPath(err))
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -528,9 +767,8 @@ func (r *Reader) ocrPage(path string, page int, language string) (string, error)
 	// pdftoppm -tiff -r 200 -f N -l N -singlefile <pdf> <prefix>
 	// This creates <prefix>.tif
 	pdftoppmArgs := []string{"-tiff", "-r", "200", "-f", strconv.Itoa(page), "-l", strconv.Itoa(page), "-singlefile", path, prefix}
-	pdftoppmCmd := exec.Command(r.pdftoppmBin, pdftoppmArgs...)
-	if out, err := pdftoppmCmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("pdftoppm failed on page %d: %w (output: %s)", page, err, string(out))
+	if _, err := runTool(pageCtx, ocrPageTimeout, nil, path, r.pdftoppmBin, pdftoppmArgs...); err != nil {
+		return "", fmt.Errorf("page %d: %w", page, err)
 	}
 
 	tiffPath := prefix + ".tif"
@@ -542,57 +780,73 @@ func (r *Reader) ocrPage(path string, page int, language string) (string, error)
 	// where tesseract cannot open files directly on some macOS installations
 	tiffData, err := os.Open(tiffPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to open TIFF file: %w", err)
+		return "", fmt.Errorf("failed to open TIFF file: %w", withoutPath(err))
 	}
 	defer tiffData.Close()
 
 	tesseractArgs := []string{"stdin", "stdout", "-l", language}
-	tesseractCmd := exec.Command(r.tesseractBin, tesseractArgs...)
-	tesseractCmd.Stdin = tiffData
+	text, err := runTool(pageCtx, ocrPageTimeout, tiffData, path, r.tesseractBin, tesseractArgs...)
 
-	var tesseractOut strings.Builder
-	var tesseractErr strings.Builder
-	tesseractCmd.Stdout = &tesseractOut
-	tesseractCmd.Stderr = &tesseractErr
-
-	if err := tesseractCmd.Run(); err != nil {
-		if tesseractOut.Len() > 0 {
-			return tesseractOut.String(), nil
-		}
-		return "", fmt.Errorf("tesseract failed on page %d: %w (stderr: %s)", page, err, tesseractErr.String())
+	// tesseract can exit non-zero after printing usable text, for instance
+	// after a warning about the resolution; that text is kept unless the
+	// deadline cut it short.
+	if err != nil && (text == "" || isContextError(err)) {
+		return "", fmt.Errorf("page %d: %w", page, err)
 	}
 
-	return tesseractOut.String(), nil
+	return text, nil
 }
 
 // ocrDocument runs OCR on all pages (or a specific page) of a PDF.
 // Returns the extracted text and the method used.
-func (r *Reader) ocrDocument(path string, page int, language string) (string, error) {
+func (r *Reader) ocrDocument(ctx context.Context, path string, page int, language string) (string, error) {
 	if !r.hasOCR {
 		return "", fmt.Errorf("OCR not available: tesseract and/or pdftoppm not installed")
 	}
 
 	if page > 0 {
-		return r.ocrPage(path, page, language)
+		return r.ocrPages(ctx, path, page, page, language)
 	}
 
 	// Get total page count
-	totalPages := r.getPageCount(path)
+	totalPages := r.getPageCount(ctx, path)
 	if totalPages == 0 {
 		// Fallback: try just page 1
 		totalPages = 1
 	}
 
+	return r.ocrPages(ctx, path, 1, totalPages, language)
+}
+
+// ocrPages runs OCR on pages firstPage to lastPage under one ocrCallTimeout.
+// A page that fails is noted in the text and the next one is tried; a
+// deadline or a cancellation stops the loop, because every later page would
+// fail the same way. A single page returns its error as it is.
+func (r *Reader) ocrPages(ctx context.Context, path string, firstPage, lastPage int, language string) (string, error) {
+	pages := lastPage - firstPage + 1
+	if pages > maxPagesPerCall {
+		return "", fmt.Errorf("%w: OCR covers at most %d pages per call and this document has %d, ask for a range with pages", errTooManyPages, maxPagesPerCall, pages)
+	}
+
+	ocrCtx, cancel := context.WithTimeout(ctx, ocrCallTimeout)
+	defer cancel()
+
+	if firstPage == lastPage {
+		return r.ocrPage(ocrCtx, path, firstPage, language)
+	}
+
 	var parts []string
-	for p := 1; p <= totalPages; p++ {
-		text, err := r.ocrPage(path, p, language)
+	for page := firstPage; page <= lastPage; page++ {
+		text, err := r.ocrPage(ocrCtx, path, page, language)
+		if isContextError(err) {
+			return "", err
+		}
 		if err != nil {
-			// Log but continue with other pages
-			parts = append(parts, fmt.Sprintf("[OCR failed on page %d: %v]", p, err))
+			parts = append(parts, fmt.Sprintf("[OCR failed on page %d: %v]", page, err))
 			continue
 		}
-		if p > 1 {
-			parts = append(parts, fmt.Sprintf("\n--- Page %d ---\n", p))
+		if page > firstPage {
+			parts = append(parts, fmt.Sprintf("\n--- Page %d ---\n", page))
 		}
 		parts = append(parts, text)
 	}
@@ -602,40 +856,45 @@ func (r *Reader) ocrDocument(path string, page int, language string) (string, er
 
 // OCRDocument performs OCR on a document in the configured directory.
 // Forces OCR regardless of whether pdftotext works. Useful for garbled text.
-func (r *Reader) OCRDocument(filename string, page int, language string) (string, error) {
+func (r *Reader) OCRDocument(ctx context.Context, filename string, page int, language string) (string, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	language, err = ocrLanguage(language)
+	if err != nil {
+		return "", err
 	}
 
-	return r.ocrDocument(path, page, language)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
+	}
+
+	return r.ocrDocument(ctx, path, page, language)
 }
 
 // readWithOCRFallback extracts text from a PDF, falling back to OCR if pdftotext
 // returns empty/whitespace-only text. Returns the text and extraction method used.
-func (r *Reader) readWithOCRFallback(path string, firstPage, lastPage int) (text string, method string, err error) {
-	text, err = r.runPdftotext(path, firstPage, lastPage)
+func (r *Reader) readWithOCRFallback(ctx context.Context, path string, firstPage, lastPage int) (text string, method string, err error) {
+	text, err = r.runPdftotext(ctx, path, firstPage, lastPage)
 	if err != nil {
 		return "", "", err
 	}
 
-	// Determine page count for threshold calculation
-	pageCount := 1
-	if firstPage > 0 && lastPage > 0 {
-		pageCount = lastPage - firstPage + 1
-	} else if firstPage == 0 && lastPage == 0 {
-		pageCount = r.getPageCount(path)
-		if pageCount == 0 {
-			pageCount = 1
+	// A whole-document read asks pdfinfo once, and that count sets both the
+	// threshold and the pages to recognise. Ranges arrive already clamped to
+	// the real page count by readPageRanges.
+	if firstPage == 0 {
+		firstPage = 1
+		lastPage = r.getPageCount(ctx, path)
+		if lastPage == 0 {
+			lastPage = 1
 		}
 	}
 
-	if !isTextEmpty(text, pageCount) {
+	if !isTextEmpty(text, lastPage-firstPage+1) {
 		return text, "pdftotext", nil
 	}
 
@@ -644,28 +903,20 @@ func (r *Reader) readWithOCRFallback(path string, firstPage, lastPage int) (text
 		return text, "pdftotext (empty, no OCR available)", nil
 	}
 
-	page := 0
-	if firstPage > 0 && firstPage == lastPage {
-		page = firstPage
-	}
-	// For ranges, OCR all pages in range
-	if firstPage > 0 && lastPage > firstPage {
-		var parts []string
-		for p := firstPage; p <= lastPage; p++ {
-			ocrText, ocrErr := r.ocrPage(path, p, "eng")
-			if ocrErr != nil {
-				parts = append(parts, fmt.Sprintf("[OCR failed on page %d: %v]", p, ocrErr))
-				continue
-			}
-			if p > firstPage {
-				parts = append(parts, fmt.Sprintf("\n--- Page %d ---\n", p))
-			}
-			parts = append(parts, ocrText)
-		}
-		return strings.Join(parts, ""), "ocr", nil
+	// The fallback has no language parameter of its own, so it follows
+	// DOCS_MCP_OCR_LANG and then English.
+	language, err := ocrLanguage("")
+	if err != nil {
+		return "", "", err
 	}
 
-	ocrText, ocrErr := r.ocrDocument(path, page, "eng")
+	ocrText, ocrErr := r.ocrPages(ctx, path, firstPage, lastPage, language)
+
+	// A deadline, a cancellation or a scan too long for one call is the
+	// caller's answer, not a reason to fall back to the empty pdftotext text.
+	if isContextError(ocrErr) || errors.Is(ocrErr, errTooManyPages) {
+		return "", "", ocrErr
+	}
 	if ocrErr != nil {
 		// Return the original (possibly empty) pdftotext result
 		return text, "pdftotext (OCR fallback failed)", nil
@@ -675,18 +926,18 @@ func (r *Reader) readWithOCRFallback(path string, firstPage, lastPage int) (text
 
 // SearchDocument searches a document for lines matching the query (case-insensitive).
 // Returns matching lines with 2 lines of context before and after, with page number hints.
-func (r *Reader) SearchDocument(filename, query string) (string, error) {
+func (r *Reader) SearchDocument(ctx context.Context, filename, query string) (string, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
-	text, err := r.extractFull(safe, path)
+	text, err := r.extractFull(ctx, safe, path)
 	if err != nil {
 		return "", err
 	}
@@ -737,19 +988,19 @@ func (r *Reader) SearchDocument(filename, query string) (string, error) {
 }
 
 // GetDocumentSummary returns the first 3 pages of text as a summary.
-func (r *Reader) GetDocumentSummary(filename string) (string, error) {
+func (r *Reader) GetDocumentSummary(ctx context.Context, filename string) (string, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	if !isPDF(safe) {
-		text, err := r.extractFull(safe, path)
+		text, err := r.extractFull(ctx, safe, path)
 		if err != nil {
 			return "", err
 		}
@@ -760,7 +1011,7 @@ func (r *Reader) GetDocumentSummary(filename string) (string, error) {
 		return fmt.Sprintf("Summary (first %d lines) of %s:\n\n%s", len(lines), safe, strings.Join(lines, "")), nil
 	}
 
-	text, err := r.extractPage(path, 1, 3)
+	text, err := r.extractPage(ctx, path, 1, 3)
 	if err != nil {
 		return "", err
 	}
@@ -769,32 +1020,32 @@ func (r *Reader) GetDocumentSummary(filename string) (string, error) {
 }
 
 // GetDocumentMetadata returns full PDF metadata using pdfinfo.
-func (r *Reader) GetDocumentMetadata(filename string) (*DocumentMetadata, error) {
+func (r *Reader) GetDocumentMetadata(ctx context.Context, filename string) (*DocumentMetadata, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return nil, err
 	}
 
-	path := r.fullPath(safe)
-	fi, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("document not found: %s", safe)
-	}
+	path, err := r.resolveDocument(safe)
 	if err != nil {
-		return nil, fmt.Errorf("cannot stat file: %w", err)
+		return nil, err
 	}
 
-	cmd := exec.Command(r.pdfinfoBin, path)
-	out, err := cmd.Output()
+	fi, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("pdfinfo failed: %w", err)
+		return nil, fmt.Errorf("cannot stat file: %w", withoutPath(err))
+	}
+
+	out, err := runTool(ctx, toolTimeout, nil, path, r.pdfinfoBin, path)
+	if err != nil {
+		return nil, err
 	}
 
 	meta := &DocumentMetadata{
 		FileSize: fi.Size(),
 	}
 
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		if idx := strings.Index(line, ":"); idx > 0 {
 			key := strings.TrimSpace(line[:idx])
 			value := strings.TrimSpace(line[idx+1:])
@@ -829,26 +1080,26 @@ func (r *Reader) GetDocumentMetadata(filename string) (*DocumentMetadata, error)
 
 // ExtractImages extracts images from a PDF using pdfimages.
 // If page > 0, only extracts from that page. Returns up to 10 images.
-func (r *Reader) ExtractImages(filename string, page int) ([]ImageInfo, error) {
+func (r *Reader) ExtractImages(ctx context.Context, filename string, page int) ([]ImageInfo, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return nil, err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return nil, err
 	}
 
-	return r.extractImagesFromPath(path, page)
+	return r.extractImagesFromPath(ctx, path, page)
 }
 
 // extractImagesFromPath extracts images from an arbitrary PDF path.
-func (r *Reader) extractImagesFromPath(path string, page int) ([]ImageInfo, error) {
+func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page int) ([]ImageInfo, error) {
 	// Create temp directory for extracted images
 	tmpDir, err := os.MkdirTemp("", "go-docs-mcp-images-")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temp dir: %w", err)
+		return nil, fmt.Errorf("failed to create temp dir: %w", withoutPath(err))
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -861,9 +1112,8 @@ func (r *Reader) extractImagesFromPath(path string, page int) ([]ImageInfo, erro
 	}
 	args = append(args, path, prefix)
 
-	cmd := exec.Command(r.pdfimagesBin, args...)
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("pdfimages failed: %w", err)
+	if _, err := runTool(ctx, toolTimeout, nil, path, r.pdfimagesBin, args...); err != nil {
+		return nil, err
 	}
 
 	// List the extracted images using pdfimages -list for metadata
@@ -873,8 +1123,12 @@ func (r *Reader) extractImagesFromPath(path string, page int) ([]ImageInfo, erro
 	}
 	listArgs = append(listArgs, path)
 
-	listCmd := exec.Command(r.pdfimagesBin, listArgs...)
-	listOut, _ := listCmd.Output()
+	// The list only adds page and size; a failure leaves them empty, but a
+	// deadline still stops the call.
+	listOut, err := runTool(ctx, toolTimeout, nil, path, r.pdfimagesBin, listArgs...)
+	if isContextError(err) {
+		return nil, err
+	}
 
 	// Parse the list output for page/width/height info
 	type imgMeta struct {
@@ -883,7 +1137,7 @@ func (r *Reader) extractImagesFromPath(path string, page int) ([]ImageInfo, erro
 		height int
 	}
 	var metas []imgMeta
-	lines := strings.Split(string(listOut), "\n")
+	lines := strings.Split(listOut, "\n")
 	for i, line := range lines {
 		if i < 2 { // skip header lines
 			continue
@@ -901,7 +1155,7 @@ func (r *Reader) extractImagesFromPath(path string, page int) ([]ImageInfo, erro
 	// Read extracted image files
 	entries, err := os.ReadDir(tmpDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read temp dir: %w", err)
+		return nil, fmt.Errorf("failed to read temp dir: %w", withoutPath(err))
 	}
 
 	var images []ImageInfo
@@ -972,7 +1226,7 @@ type FormatInfo struct {
 func (r *Reader) ListFormats() []FormatInfo {
 	_, errPdftotext := exec.LookPath(r.pdftotextBin)
 	_, errTesseract := exec.LookPath(r.tesseractBin)
-	_, errPandoc := exec.LookPath("pandoc")
+	_, errPandoc := exec.LookPath(r.pandocBin)
 
 	return []FormatInfo{
 		{Extension: ".pdf", Status: "supported", Requires: "poppler", Installed: errPdftotext == nil},
@@ -985,61 +1239,55 @@ func (r *Reader) ListFormats() []FormatInfo {
 }
 
 // ReadImage performs OCR on a standalone image file using tesseract directly.
-func (r *Reader) ReadImage(filename string, language string) (string, error) {
+func (r *Reader) ReadImage(ctx context.Context, filename string, language string) (string, error) {
 	safe, err := r.sanitizeImageFilename(filename)
 	if err != nil {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("image not found: %s", safe)
+	language, err = ocrLanguage(language)
+	if err != nil {
+		return "", err
+	}
+
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	if _, err := exec.LookPath(r.tesseractBin); err != nil {
 		return "", fmt.Errorf("tesseract not available: install with 'brew install tesseract'")
 	}
 
-	if language == "" {
-		language = "eng"
-	}
-
 	// Open image and pipe to tesseract via stdin
 	imgData, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("failed to open image file: %w", err)
+		return "", fmt.Errorf("failed to open image file: %w", withoutPath(err))
 	}
 	defer imgData.Close()
 
 	tesseractArgs := []string{"stdin", "stdout", "-l", language}
-	cmd := exec.Command(r.tesseractBin, tesseractArgs...)
-	cmd.Stdin = imgData
+	text, err := runTool(ctx, ocrPageTimeout, imgData, path, r.tesseractBin, tesseractArgs...)
 
-	var stdout strings.Builder
-	var stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if stdout.Len() > 0 {
-			return stdout.String(), nil
-		}
-		return "", fmt.Errorf("tesseract failed: %w (stderr: %s)", err, stderr.String())
+	// As with a PDF page, text printed before a non-zero exit is kept unless
+	// the deadline cut it short.
+	if err != nil && (text == "" || isContextError(err)) {
+		return "", err
 	}
 
-	return stdout.String(), nil
+	return text, nil
 }
 
 // GetDocumentOutline extracts heading structure from a document.
-func (r *Reader) GetDocumentOutline(filename string) ([]OutlineEntry, error) {
+func (r *Reader) GetDocumentOutline(ctx context.Context, filename string) ([]OutlineEntry, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return nil, err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return nil, err
 	}
 
 	ext := strings.ToLower(filepath.Ext(safe))
@@ -1050,7 +1298,7 @@ func (r *Reader) GetDocumentOutline(filename string) ([]OutlineEntry, error) {
 	case ".txt":
 		return r.outlineMarkdown(path) // try markdown headings in txt files too
 	case ".pdf":
-		return r.outlinePDF(path)
+		return r.outlinePDF(ctx, path)
 	default:
 		return nil, fmt.Errorf("outline extraction not supported for %s files", ext)
 	}
@@ -1060,7 +1308,7 @@ func (r *Reader) GetDocumentOutline(filename string) ([]OutlineEntry, error) {
 func (r *Reader) outlineMarkdown(path string) ([]OutlineEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 
 	var entries []OutlineEntry
@@ -1092,8 +1340,8 @@ func (r *Reader) outlineMarkdown(path string) ([]OutlineEntry, error) {
 }
 
 // outlinePDF extracts heading-like structures from PDF text.
-func (r *Reader) outlinePDF(path string) ([]OutlineEntry, error) {
-	text, err := r.runPdftotext(path, 0, 0)
+func (r *Reader) outlinePDF(ctx context.Context, path string) ([]OutlineEntry, error) {
+	text, err := r.runPdftotext(ctx, path, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -1218,15 +1466,15 @@ func matchNumberedHeading(line string) int {
 }
 
 // ExtractTables extracts table-like structures from a document.
-func (r *Reader) ExtractTables(filename string, page int) ([]TableData, error) {
+func (r *Reader) ExtractTables(ctx context.Context, filename string, page int) ([]TableData, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return nil, err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return nil, err
 	}
 
 	ext := strings.ToLower(filepath.Ext(safe))
@@ -1237,7 +1485,7 @@ func (r *Reader) ExtractTables(filename string, page int) ([]TableData, error) {
 	case ".md":
 		return r.tablesMarkdown(path)
 	case ".pdf":
-		return r.tablesPDF(path, page)
+		return r.tablesPDF(ctx, path, page)
 	case ".txt":
 		return r.tablesPlaintext(path)
 	default:
@@ -1249,7 +1497,7 @@ func (r *Reader) ExtractTables(filename string, page int) ([]TableData, error) {
 func (r *Reader) tablesCSV(path string) ([]TableData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
@@ -1297,7 +1545,7 @@ func splitCSVLine(line string) []string {
 func (r *Reader) tablesMarkdown(path string) ([]TableData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -1356,13 +1604,13 @@ func parsePipeRow(line string) []string {
 }
 
 // tablesPDF extracts table-like structures from PDF text using layout analysis.
-func (r *Reader) tablesPDF(path string, page int) ([]TableData, error) {
+func (r *Reader) tablesPDF(ctx context.Context, path string, page int) ([]TableData, error) {
 	var text string
 	var err error
 	if page > 0 {
-		text, err = r.runPdftotext(path, page, page)
+		text, err = r.runPdftotext(ctx, path, page, page)
 	} else {
-		text, err = r.runPdftotext(path, 0, 0)
+		text, err = r.runPdftotext(ctx, path, 0, 0)
 	}
 	if err != nil {
 		return nil, err
@@ -1375,7 +1623,7 @@ func (r *Reader) tablesPDF(path string, page int) ([]TableData, error) {
 func (r *Reader) tablesPlaintext(path string) ([]TableData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 
 	return r.detectTablesFromLayout(string(data), 0), nil
@@ -1474,15 +1722,15 @@ func detectTableRow(line string) []string {
 // ConvertToMarkdown converts a document to clean Markdown format.
 // For .md files, returns raw content. For .txt/.csv, wraps in code blocks.
 // For .pdf, extracts text and formats headings. Other formats return raw text with a header.
-func (r *Reader) ConvertToMarkdown(filename string) (string, error) {
+func (r *Reader) ConvertToMarkdown(ctx context.Context, filename string) (string, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
 		return "", err
 	}
 
-	path := r.fullPath(safe)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("document not found: %s", safe)
+	path, err := r.resolveDocument(safe)
+	if err != nil {
+		return "", err
 	}
 
 	ext := strings.ToLower(filepath.Ext(safe))
@@ -1491,26 +1739,26 @@ func (r *Reader) ConvertToMarkdown(filename string) (string, error) {
 	case ".md":
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("failed to read file: %w", err)
+			return "", fmt.Errorf("failed to read file: %w", withoutPath(err))
 		}
 		return string(data), nil
 
 	case ".txt":
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("failed to read file: %w", err)
+			return "", fmt.Errorf("failed to read file: %w", withoutPath(err))
 		}
 		return fmt.Sprintf("```text\n%s\n```", string(data)), nil
 
 	case ".csv":
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("failed to read file: %w", err)
+			return "", fmt.Errorf("failed to read file: %w", withoutPath(err))
 		}
 		return fmt.Sprintf("```csv\n%s\n```", string(data)), nil
 
 	case ".pdf":
-		text, err := r.extractFull(safe, path)
+		text, err := r.extractFull(ctx, safe, path)
 		if err != nil {
 			return "", err
 		}
@@ -1518,7 +1766,7 @@ func (r *Reader) ConvertToMarkdown(filename string) (string, error) {
 
 	default:
 		// Other supported formats (e.g. .docx): return raw text with a header
-		text, err := r.ReadDocument(filename, 0)
+		text, err := r.ReadDocument(ctx, filename, 0)
 		if err != nil {
 			return "", err
 		}

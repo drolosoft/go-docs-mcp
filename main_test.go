@@ -278,7 +278,7 @@ func TestDownloadSavesPlainTextAsTxt(t *testing.T) {
 		t.Errorf("saved as %s, want a .txt file", filepath.Base(path))
 	}
 
-	text, err := readDownloaded(pdf.NewReader(t.TempDir()), path, "")
+	text, err := readDownloaded(context.Background(), pdf.NewReader(t.TempDir()), path, "")
 	if err != nil {
 		t.Fatalf("readDownloaded: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestDownloadSavesPlainTextAsTxt(t *testing.T) {
 		t.Errorf("text = %q, want %q", text, body)
 	}
 
-	if _, err := readDownloaded(pdf.NewReader(t.TempDir()), path, "1-2"); err == nil {
+	if _, err := readDownloaded(context.Background(), pdf.NewReader(t.TempDir()), path, "1-2"); err == nil {
 		t.Error("page ranges on a text download were accepted")
 	}
 }
