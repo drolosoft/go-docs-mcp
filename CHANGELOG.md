@@ -6,6 +6,56 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v1.4.0] - 2026-11-08
+
+Formats, paging and distribution. Every v1.3.0 call still works; the new
+parameters are optional and the structured results keep their text form.
+
+### Added
+
+- Formats through pandoc: XLSX, PPTX, ODT, EPUB, HTML, RTF and Jupyter
+  notebooks (IPYNB), next to DOCX. `convert_to_markdown` returns
+  GitHub-flavoured Markdown for all of them.
+- `list_documents` lists images too, and every entry carries a `type`.
+  WebP joins the image formats.
+- Paging: `offset` and `max_chars` (default 50000, cap 200000) on
+  `read_document`, `convert_to_markdown` and `ocr_document`, with a trailer
+  that names the next offset; `max_results` (default 50) on
+  `search_document`; `max_images` on `extract_images`. A 1 MB limit on any
+  tool result as the last line of defence.
+- Structured output (`outputSchema` and `structuredContent`) on
+  `list_documents`, `list_formats`, `get_document_metadata`,
+  `get_document_outline` and `extract_tables`.
+- Resources: every document is a `docs://{filename}` resource, listed on
+  every `resources/list`, so Claude Code can @-mention documents.
+- Server instructions that tell the model the recommended order: list,
+  outline, search, then read by pages.
+- Progress notifications from `ocr_document` when the call carries a
+  progress token.
+- `DOCS_MCP_CACHE_MB` (default 256): the text cache is bounded and evicts
+  the least recently used document.
+- CI on GitHub Actions (gofmt, vet, race tests with poppler, tesseract and
+  pandoc, govulncheck, on Ubuntu and macOS), Dependabot, a release workflow
+  with goreleaser (macOS, Linux, Windows archives and checksums), a Homebrew
+  formula in `drolosoft/homebrew-tap`, a Claude Code plugin in
+  `drolosoft/claude-plugins`, and `CONTRIBUTING.md`.
+
+### Changed
+
+- `extract_images` returns real images: PNG image content per picture,
+  alpha and stencil masks skipped, scaled to 1600 px on the longer side,
+  8 MB per answer. It used to return raw PPM as base64 inside a JSON text
+  block, which no client could show and which blew past output limits.
+- `get_document_summary`, `get_document_outline` and `extract_tables` use
+  the same cache and OCR fallback as `read_document`, instead of running
+  pdftotext on every call.
+- CSV is parsed with `encoding/csv`, so quoted fields with newlines work.
+- OCR output marks page breaks like pdftotext does, so `search_document`
+  reports the right page on scanned documents.
+- `ocr_document` refuses files that are not PDFs and points to `read_image`.
+- Dockerfile: non-root user, pandoc and English tesseract data installed,
+  `VOLUME /documents` served by default.
+
 ## [v1.3.0] - 2026-11-08
 
 Security and dependency release. No tool was added or removed, and no tool
@@ -73,6 +123,7 @@ changed its parameters; clients that worked with v1.2.0 keep working.
 Initial public releases: 12 tools over PDF, TXT, MD, CSV, DOCX and images,
 stdio transport, mtime cache, OCR fallback with tesseract.
 
-[Unreleased]: https://github.com/drolosoft/go-docs-mcp/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/drolosoft/go-docs-mcp/compare/v1.4.0...HEAD
+[v1.4.0]: https://github.com/drolosoft/go-docs-mcp/compare/v1.3.0...v1.4.0
 [v1.3.0]: https://github.com/drolosoft/go-docs-mcp/compare/v1.2.0...v1.3.0
 [v1.2.0]: https://github.com/drolosoft/go-docs-mcp/compare/v1.1.0...v1.2.0

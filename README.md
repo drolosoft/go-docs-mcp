@@ -11,9 +11,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
-> **Install and Go.** One command, single binary. Your AI reads any document — PDF, text, Markdown, DOCX, images.
+> **Install and Go.** One command, single binary. Your AI reads any document — PDF, text, Markdown, Office files, EPUB, HTML, notebooks, images.
 
-MCP server for multi-format document access — read, search, extract images, OCR, and fetch documents from URLs via the [Model Context Protocol](https://modelcontextprotocol.io). 13 tools, 6 formats, zero configuration.
+MCP server for multi-format document access — read, search, extract images, OCR, and fetch documents from URLs via the [Model Context Protocol](https://modelcontextprotocol.io). 13 tools, 14 formats, zero configuration.
 
 ```bash
 go install github.com/drolosoft/go-docs-mcp@latest
@@ -32,7 +32,7 @@ Every other document MCP server handles **one format** — a PDF server for PDFs
 |--|:---:|:---:|
 | Single binary, no runtime | **Yes** | Need Node/Python |
 | `go install` one-liner | **Yes** | npm+deps or pip+venv |
-| Multi-format (6 types) | **Yes** | One format each |
+| Multi-format (14 types) | **Yes** | One format each |
 | Full-text search | **Yes** | Partial or none |
 | OCR (scanned PDFs + images) | **Yes** | Rare |
 | Image & table extraction | **Yes** | Partial |
@@ -59,15 +59,17 @@ Go-Docs MCP reads them all from a single binary — fast, secure, and dependency
 | **Analysis** | `get_document_metadata` | Title, author, dates, version, page count |
 | **Analysis** | `get_document_outline` | Heading structure deduced from the text |
 | **Analysis** | `extract_tables` | Tables as structured data |
-| **Analysis** | `extract_images` | Images as base64 (max 10 per call) |
+| **Analysis** | `extract_images` | Images as PNG image content, scaled to fit (max 10 per call, 8 MB budget) |
 | **OCR** | `ocr_document` | Force OCR on scanned/image-based PDFs |
-| **OCR** | `read_image` | Extract text from PNG, JPG, TIFF via OCR |
+| **OCR** | `read_image` | Extract text from PNG, JPG, WebP, TIFF, BMP via OCR |
 | **Export** | `convert_to_markdown` | Convert any document to clean Markdown |
 
 **Highlights:**
 
 - **Fast** — mtime-based in-memory caching avoids redundant extraction
-- **Multi-format** — PDF, TXT, MD, CSV, DOCX, and images from one server
+- **Multi-format** — PDF, text, Markdown, CSV, DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, Jupyter notebooks and images from one server
+- **Paged output** — `offset` and `max_chars` on the text tools, so a 200 MB file never floods the model
+- **Resources** — every document is also a `docs://` resource, so Claude Code can @-mention it
 - **OCR** — automatic fallback to tesseract for scanned documents
 - **Secure** — directory-locked with path traversal prevention
 - **Portable** — works on macOS and Linux
@@ -79,9 +81,12 @@ Go-Docs MCP reads them all from a single binary — fast, secure, and dependency
 | Format | Dependencies | Notes |
 |--------|-------------|-------|
 | PDF | poppler (`pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`) | Full support — text, images, metadata, OCR fallback |
-| TXT, MD, CSV | None | Native, zero dependencies |
-| DOCX | pandoc (optional) | Word document extraction |
-| Images (PNG, JPG, TIFF) | tesseract (optional) | OCR text extraction |
+| TXT, MD, CSV | None | Native, zero dependencies. CSV is parsed with `encoding/csv`, so quoted newlines work |
+| DOCX, XLSX, PPTX, ODT | pandoc (optional) | Office documents, text and tables |
+| EPUB, HTML, RTF, IPYNB | pandoc (optional) | Books, web pages, rich text and Jupyter notebooks |
+| Images (PNG, JPG, WebP, TIFF, BMP) | tesseract (optional) | OCR text extraction; listed by `list_documents` with `"type": "image"` |
+
+`convert_to_markdown` returns GitHub-flavoured Markdown for every pandoc-backed format.
 
 ---
 
@@ -96,17 +101,17 @@ Go-Docs MCP reads them all from a single binary — fast, secure, and dependency
 # macOS
 brew install poppler
 brew install tesseract        # optional: OCR
-brew install pandoc           # optional: DOCX
+brew install pandoc           # optional: DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, IPYNB
 
 # Debian/Ubuntu
 apt install poppler-utils
 apt install tesseract-ocr     # optional: OCR
-apt install pandoc            # optional: DOCX
+apt install pandoc            # optional: Office, EPUB, HTML, RTF, IPYNB
 
 # Fedora/RHEL
 dnf install poppler-utils
 dnf install tesseract         # optional: OCR
-dnf install pandoc            # optional: DOCX
+dnf install pandoc            # optional: Office, EPUB, HTML, RTF, IPYNB
 ```
 
 > **Note:** TXT, MD, and CSV work out of the box with zero dependencies. Install only what you need.
@@ -114,6 +119,25 @@ dnf install pandoc            # optional: DOCX
 ---
 
 ## 🚀 Installation
+
+### Homebrew (macOS and Linux)
+
+```bash
+brew install drolosoft/tap/go-docs-mcp   # brings poppler, tesseract and pandoc with it
+```
+
+### Prebuilt binaries
+
+Every release on the [releases page](https://github.com/drolosoft/go-docs-mcp/releases) ships archives for macOS (Apple Silicon and Intel), Linux (amd64 and arm64) and Windows (amd64), with a `checksums.txt` to verify them.
+
+### Docker
+
+```bash
+docker build -t go-docs-mcp .
+docker run -i --rm -v /path/to/your/documents:/documents go-docs-mcp
+```
+
+The image runs as a non-root user, includes poppler, tesseract (English data) and pandoc, and serves `/documents`.
 
 ### From source
 
@@ -140,8 +164,19 @@ Go-Docs MCP reads documents from a configured directory. Set `DOCS_MCP_DIR` to c
 |----------|---------|-------------|
 | `DOCS_MCP_DIR` | `~/.docs-mcp/documents/` | Directory containing documents to serve |
 | `PDF_MCP_DIR` | _(legacy alias)_ | Backward-compatible alias for `DOCS_MCP_DIR` |
+| `DOCS_MCP_OCR_LANG` | `eng` | Tesseract language used when a call brings none |
+| `DOCS_MCP_CACHE_MB` | `256` | Upper bound of the in-memory text cache; least recently used documents are evicted first |
+| `DOCS_MCP_DISABLE_URL` | _(unset)_ | Set to `1` to remove the `read_url` tool |
 
 Place your documents in the directory and the server finds them automatically. All supported formats are detected.
+
+### Resources
+
+Every document is also exposed as an MCP resource with the URI `docs://<filename>` (percent-encoded). Clients that support resources, such as Claude Code with `@docs://report.pdf`, can pull a document into the conversation without calling a tool. The list is rebuilt on every `resources/list`, so files added after startup show up.
+
+### Structured output
+
+`list_documents`, `list_formats`, `get_document_metadata`, `get_document_outline` and `extract_tables` declare an output schema and return `structuredContent` next to the JSON text they always returned, so older clients see no change.
 
 ---
 
@@ -211,14 +246,23 @@ Lists all documents in the configured directory with format detection.
   {
     "filename": "architecture-guide.pdf",
     "title": "architecture-guide",
+    "type": "pdf",
     "pages": 42,
     "size_bytes": 1048576
   },
   {
     "filename": "notes.md",
     "title": "notes",
+    "type": "markdown",
     "pages": 0,
     "size_bytes": 4096
+  },
+  {
+    "filename": "receipt.png",
+    "title": "receipt",
+    "type": "image",
+    "pages": 0,
+    "size_bytes": 220144
   }
 ]
 ```
@@ -244,6 +288,10 @@ Reads the extracted text content of a document. Automatically falls back to OCR 
 | `filename` | string | Yes | The document filename to read |
 | `page` | number | No | Single page number (1-based). Omit for full text. |
 | `pages` | string | No | Page ranges, e.g. "1-5", "10", "1-3,7,10-12". Overrides `page`. |
+| `offset` | number | No | Character offset to start from (default 0). |
+| `max_chars` | number | No | Characters to return (default 50000, at most 200000). |
+
+When the text is longer than `max_chars`, the result ends with a line that says how many characters there are and which `offset` to pass next. `convert_to_markdown` and `ocr_document` take the same two parameters.
 
 **Example input:**
 ```json
@@ -265,6 +313,7 @@ Searches within a document for lines matching a query. Returns matches with 2 li
 |------|------|----------|-------------|
 | `filename` | string | Yes | The document filename to search |
 | `query` | string | Yes | Search query (case-insensitive) |
+| `max_results` | number | No | Upper bound of matches returned (default 50). |
 
 **Example output:**
 ```
@@ -345,7 +394,7 @@ Extracts tables from a document as structured data.
 
 ### `extract_images`
 
-Extracts images from a document as base64-encoded data. Returns up to 10 images per call.
+Extracts the images of a PDF and returns each one as MCP image content (`image/png`), so clients that render images show them. Alpha masks and stencil masks are skipped, images are scaled down to 1600 px on the longer side, and the whole answer stays under 8 MB.
 
 **Parameters:**
 
@@ -353,20 +402,7 @@ Extracts images from a document as base64-encoded data. Returns up to 10 images 
 |------|------|----------|-------------|
 | `filename` | string | Yes | The document filename to extract images from |
 | `page` | number | No | Specific page to extract from. Omit for all pages. |
-
-**Example output:**
-```json
-[
-  {
-    "page": 1,
-    "index": 0,
-    "format": "jpeg",
-    "width": 800,
-    "height": 600,
-    "data_base64": "/9j/4AAQSkZJRg..."
-  }
-]
-```
+| `max_images` | number | No | Upper bound of images returned (default 10). |
 
 ---
 
@@ -403,7 +439,8 @@ Forces OCR on a PDF document using tesseract. Useful for scanned/image-based PDF
 |------|------|----------|-------------|
 | `filename` | string | Yes | The PDF filename to OCR |
 | `page` | number | No | Specific page to OCR (1-based). Omit for all pages. |
-| `language` | string | No | Tesseract language code (default: `eng`). Use `spa`, `fra`, etc. |
+| `language` | string | No | Tesseract language code (default: `DOCS_MCP_OCR_LANG`, then `eng`). Use `spa`, `fra`, etc. |
+| `offset`, `max_chars` | number | No | Same paging as `read_document`. |
 
 **Example input:**
 ```json
@@ -418,14 +455,14 @@ Forces OCR on a PDF document using tesseract. Useful for scanned/image-based PDF
 
 ### `read_image`
 
-Extracts text from an image file using OCR. Supports PNG, JPG, and TIFF. Requires `tesseract`.
+Extracts text from an image file using OCR. Supports PNG, JPG, WebP, TIFF and BMP. Requires `tesseract`.
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `filename` | string | Yes | The image filename to read (PNG, JPG, TIFF) |
-| `language` | string | No | Tesseract language code (default: `eng`). |
+| `filename` | string | Yes | The image filename to read (PNG, JPG, WebP, TIFF, BMP) |
+| `language` | string | No | Tesseract language code (default: `DOCS_MCP_OCR_LANG`, then `eng`). |
 
 **Example input:**
 ```json
@@ -458,11 +495,14 @@ make test      # Run tests with race detector
 make clean     # Remove build artifacts
 ```
 
+CI runs gofmt, vet, the race tests with poppler, tesseract and pandoc installed, and govulncheck on every push. A tag `v*` builds the release archives with goreleaser. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ### Project structure
 
 ```
 go-docs-mcp/
   main.go              # MCP server setup, 13 tool registrations
+  resources.go         # docs:// resources
   internal/
     pdf/
       reader.go        # Document extraction, caching, search, metadata, images, OCR
