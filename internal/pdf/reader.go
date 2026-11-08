@@ -165,6 +165,13 @@ type Reader struct {
 	pandocBin    string
 	hasOCR       bool // true if both pdftoppm and tesseract are available
 
+	// pandocReaders holds the input formats the installed pandoc accepts,
+	// read once from `pandoc --list-input-formats`. Distro packages lag
+	// behind: Ubuntu's pandoc has no xlsx or pptx reader, so the table of
+	// pandocFormats says what we could read and this set what we can.
+	pandocReaders     map[string]bool
+	pandocReadersOnce sync.Once
+
 	// cache holds the full text of documents already read, keyed by file
 	// name, within the DOCS_MCP_CACHE_MB cap.
 	cache *textCache
@@ -453,11 +460,48 @@ const (
 	pandocMarkdown = "gfm"
 )
 
+// loadPandocReaders asks pandoc once which input formats it accepts. When
+// pandoc is missing or the call fails the set stays empty, and every pandoc
+// format reports itself as not readable.
+func (r *Reader) loadPandocReaders() {
+	r.pandocReadersOnce.Do(func() {
+		r.pandocReaders = map[string]bool{}
+
+		if _, err := exec.LookPath(r.pandocBin); err != nil {
+			return
+		}
+
+		// Listing formats is instant, so a short deadline is enough.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		out, err := exec.CommandContext(ctx, r.pandocBin, "--list-input-formats").Output()
+		if err != nil {
+			return
+		}
+
+		for _, reader := range strings.Fields(string(out)) {
+			r.pandocReaders[reader] = true
+		}
+	})
+}
+
+// pandocCanRead reports whether the installed pandoc has the reader a
+// pandocFormat needs.
+func (r *Reader) pandocCanRead(format pandocFormat) bool {
+	r.loadPandocReaders()
+	return r.pandocReaders[format.reader]
+}
+
 // convertWithPandoc converts the document at path from format to the pandoc
 // writer target, without line wrapping so a paragraph stays on one line.
 func (r *Reader) convertWithPandoc(ctx context.Context, path string, format pandocFormat, target string) (string, error) {
 	if _, err := exec.LookPath(r.pandocBin); err != nil {
 		return "", fmt.Errorf("reading %s requires pandoc (install pandoc and retry)", format.extension)
+	}
+
+	if !r.pandocCanRead(format) {
+		return "", fmt.Errorf("reading %s needs a pandoc with the %q reader; the installed one lacks it (see pandoc --list-input-formats), install a newer pandoc from pandoc.org and retry", format.extension, format.reader)
 	}
 
 	out, err := runTool(ctx, toolTimeout, nil, path, r.pandocBin, "-f", format.reader, "-t", target, "--wrap=none", path)
@@ -1824,8 +1868,10 @@ func (r *Reader) ListFormats() []FormatInfo {
 		{Extension: ".csv", Status: "supported", Requires: "none", Installed: true},
 	}
 
+	// A pandoc format counts as installed only when this pandoc can read it.
 	for _, format := range pandocFormats {
-		formats = append(formats, FormatInfo{Extension: format.extension, Status: "optional", Requires: "pandoc", Installed: errPandoc == nil})
+		installed := errPandoc == nil && r.pandocCanRead(format)
+		formats = append(formats, FormatInfo{Extension: format.extension, Status: "optional", Requires: "pandoc", Installed: installed})
 	}
 
 	formats = append(formats, FormatInfo{Extension: strings.Join(imageExtensions, "/"), Status: "optional", Requires: "tesseract", Installed: errTesseract == nil})

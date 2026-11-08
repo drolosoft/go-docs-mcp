@@ -2102,12 +2102,26 @@ var pandocFixtureCases = []pandocFixtureCase{
 	{"analysis.ipynb", writeTextFixture(pandocFixtureNotebook), "# Heading"},
 }
 
+// requirePandocReader skips the subtest, saying so, when the installed pandoc
+// has no reader for name's format: distro packages often lack xlsx and pptx.
+func requirePandocReader(t *testing.T, r *Reader, name string) {
+	t.Helper()
+	format, ok := pandocFormatFor(name)
+	if !ok {
+		t.Fatalf("%s is not a pandoc format", name)
+	}
+	if !r.pandocCanRead(format) {
+		t.Skipf("the installed pandoc has no %q reader: skipping %s", format.reader, name)
+	}
+}
+
 func TestReadDocument_PandocFormats(t *testing.T) {
 	pandoc := requirePandoc(t)
 
 	for _, testCase := range pandocFixtureCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			r, dir := newTestReader(t)
+			requirePandocReader(t, r, testCase.name)
 			testCase.write(t, pandoc, dir, testCase.name)
 
 			got, err := r.ReadDocument(t.Context(), testCase.name, 0)
@@ -2184,6 +2198,7 @@ func TestConvertToMarkdown_PandocFormatsGiveGFM(t *testing.T) {
 	for _, testCase := range pandocFixtureCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			r, dir := newTestReader(t)
+			requirePandocReader(t, r, testCase.name)
 			testCase.write(t, pandoc, dir, testCase.name)
 
 			got, err := r.ConvertToMarkdown(t.Context(), testCase.name)
@@ -3065,5 +3080,45 @@ func TestBoxResample_AveragesTheCoveredPixels(t *testing.T) {
 	}
 	if !slices.Equal(mixed.Pix, []uint8{128, 0, 128, 255}) {
 		t.Errorf("colour pixel = %v, want [128 0 128 255]", mixed.Pix)
+	}
+}
+
+// writeFakePandoc writes a pandoc stand-in that lists only the given input
+// formats and fails on any conversion, so a test can act as an old distro
+// pandoc without one installed.
+func writeFakePandoc(t *testing.T, readers ...string) string {
+	t.Helper()
+	script := "#!/bin/sh\nif [ \"$1\" = \"--list-input-formats\" ]; then\n"
+	for _, reader := range readers {
+		script += "  echo " + reader + "\n"
+	}
+	script += "  exit 0\nfi\necho 'Unknown input format' >&2\nexit 21\n"
+
+	path := filepath.Join(t.TempDir(), "pandoc")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write the fake pandoc: %v", err)
+	}
+	return path
+}
+
+func TestPandocFormatsNeedTheirReader(t *testing.T) {
+	r, dir := newTestReader(t)
+	r.pandocBin = writeFakePandoc(t, "docx", "html")
+
+	if err := os.WriteFile(filepath.Join(dir, "sheet.xlsx"), []byte("not really a sheet"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := r.ReadDocument(t.Context(), "sheet.xlsx", 0)
+	if err == nil || !strings.Contains(err.Error(), `"xlsx" reader`) {
+		t.Fatalf("ReadDocument(sheet.xlsx) with an old pandoc: err = %v, want the missing-reader message", err)
+	}
+
+	installed := map[string]bool{}
+	for _, format := range r.ListFormats() {
+		installed[format.Extension] = format.Installed
+	}
+	if !installed[".docx"] || installed[".xlsx"] || installed[".pptx"] {
+		t.Fatalf("ListFormats: docx=%v xlsx=%v pptx=%v, want only docx installed", installed[".docx"], installed[".xlsx"], installed[".pptx"])
 	}
 }

@@ -27,11 +27,17 @@ jobs:
 
       # Without these binaries the reader tests skip themselves, and CI would
       # pass without ever running pdftotext, tesseract or pandoc.
+      # Ubuntu's pandoc package has no xlsx or pptx reader, so pandoc comes
+      # from the upstream .deb instead; the version is pinned on purpose.
       - name: Install poppler, tesseract and pandoc
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            poppler-utils tesseract-ocr tesseract-ocr-eng pandoc
+            poppler-utils tesseract-ocr tesseract-ocr-eng
+          curl -fsSL -o /tmp/pandoc.deb \
+            https://github.com/jgm/pandoc/releases/download/3.10.2/pandoc-3.10.2-1-amd64.deb
+          sudo dpkg -i /tmp/pandoc.deb
+          pandoc --version | head -1
 
       - name: Fmt check
         run: |
