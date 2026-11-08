@@ -138,6 +138,7 @@ func newServer(reader *pdf.Reader, docsDir string, extra ...server.ServerOption)
 		server.WithResourceCapabilities(false, false),
 		server.WithHooks(hooks),
 		server.WithInstructions(serverInstructions),
+		server.WithToolResultSizeLimit(maxToolResultBytes),
 	}
 	options = append(options, extra...)
 

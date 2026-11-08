@@ -7,6 +7,14 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
+// maxToolResultBytes is the last line of defence against a result no client
+// can take: mcp-go replaces any tool result whose JSON is larger with an
+// error. The tools bound their own output first (max_chars, max_results,
+// the image budget), so this only fires on a path that forgot to. It sits
+// above the largest legitimate result, extract_images' 8 MB of images plus
+// their description, because one limit applies to every tool.
+const maxToolResultBytes = 9 << 20
+
 // textPagingOptions adds the offset and max_chars arguments, and the output
 // schema of a text page, to a tool that returns the text of a document.
 func textPagingOptions() mcp.ToolOption {

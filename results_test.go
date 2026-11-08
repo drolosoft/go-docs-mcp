@@ -206,3 +206,19 @@ func TestPagedTools_StructuredContentMatchesTheOutputSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestServer_RefusesAResultOverTheSizeLimit(t *testing.T) {
+	mcpServer, docsDir := newTestServer(t)
+
+	// Every line matches and is long, so the search result is several times
+	// the limit even with the match cap: only the server's size check can
+	// stop it.
+	line := strings.Repeat("needle ", 4000)
+	writeTestFile(t, docsDir, "huge.txt", strings.Repeat(line+"\n", 80))
+
+	result := callToolMayFail(t, mcpServer, "search_document", map[string]any{"filename": "huge.txt", "query": "needle", "max_results": pdf.MaxSearchResultsLimit})
+
+	if !result.IsError || !strings.Contains(result.Content[0].Text, "tool result exceeds") {
+		t.Errorf("an oversized result must be replaced by an error, got isError=%v and %d content items", result.IsError, len(result.Content))
+	}
+}
