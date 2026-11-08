@@ -3,20 +3,56 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/drolosoft/go-docs-mcp/internal/pdf"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const maxURLFileSize = 50 * 1024 * 1024 // 50MB
+// maxURLFileSize caps a read_url download at 50MB, enough for a long
+// report and small enough that one call cannot fill the disk.
+const maxURLFileSize = 50 * 1024 * 1024
+
+// urlDownloadTimeout bounds a whole read_url download, headers and body
+// together: a 50MB file fits in it on a slow line, and a server that stalls
+// cannot hold the tool call open for ever.
+const urlDownloadTimeout = 60 * time.Second
+
+// urlDialTimeout bounds the TCP connect alone, so an unroutable host fails
+// fast instead of using up the whole download timeout.
+const urlDialTimeout = 10 * time.Second
+
+// maxURLRedirects keeps net/http's default limit, which a custom
+// CheckRedirect replaces.
+const maxURLRedirects = 10
+
+// errPrivateAddress marks a read_url target refused because it points inside
+// the machine or its network (the classic SSRF to a cloud metadata endpoint).
+var errPrivateAddress = errors.New("refusing to fetch a private, loopback or link-local address")
+
+// nonPublicPrefixes are ranges netip has no predicate for that must not be
+// fetched either: 0.0.0.0/8 reaches the local host on Linux, and
+// 100.64.0.0/10 is carrier-grade NAT space, which Tailscale uses for the
+// tailnet.
+var nonPublicPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+}
 
 func main() {
 	// Determine documents directory: DOCS_MCP_DIR (primary), PDF_MCP_DIR (backward compat), DROLO_DOCS_DIR (legacy)
@@ -87,14 +123,16 @@ func newServer(reader *pdf.Reader, docsDir string) *server.MCPServer {
 		server.WithToolCapabilities(true),
 	)
 
-	// Register tools (13 total)
+	// Register tools (13 total, 12 when read_url is disabled)
 	registerListDocuments(s, reader)
 	registerReadDocument(s, reader)
 	registerSearchDocument(s, reader)
 	registerGetDocumentSummary(s, reader)
 	registerGetDocumentMetadata(s, reader)
 	registerExtractImages(s, reader)
-	registerReadURL(s, reader)
+	if urlToolEnabled() {
+		registerReadURL(s, reader, newURLFetcher(urlDownloadTimeout))
+	}
 	registerOCRDocument(s, reader)
 	registerListFormats(s, reader)
 	registerReadImage(s, reader)
@@ -312,7 +350,16 @@ func registerExtractImages(s *server.MCPServer, reader *pdf.Reader) {
 	})
 }
 
-func registerReadURL(s *server.MCPServer, reader *pdf.Reader) {
+// urlToolEnabled reports whether read_url should be offered. Setting
+// DOCS_MCP_DISABLE_URL=1 removes it, for installs that must never reach the
+// network on a model's request.
+func urlToolEnabled() bool {
+	disabled, err := strconv.ParseBool(os.Getenv("DOCS_MCP_DISABLE_URL"))
+
+	return err != nil || !disabled
+}
+
+func registerReadURL(s *server.MCPServer, reader *pdf.Reader, fetcher *urlFetcher) {
 	tool := mcp.NewTool("read_url",
 		mcp.WithDescription("Download a document from a URL and extract its text content (max 50MB). Use this when the document is hosted online rather than in the local directory; supports PDF and plain text URLs. Read-only, downloads to a temporary file."),
 		mcp.WithTitleAnnotation("Read URL"),
@@ -327,14 +374,14 @@ func registerReadURL(s *server.MCPServer, reader *pdf.Reader) {
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		url, err := request.RequireString("url")
+		rawURL, err := request.RequireString("url")
 		if err != nil {
 			return mcp.NewToolResultError("url parameter is required"), nil
 		}
 
 		pagesStr := request.GetString("pages", "")
 
-		text, err := downloadAndReadPDF(reader, url, pagesStr)
+		text, err := downloadAndRead(ctx, fetcher, reader, rawURL, pagesStr)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error reading URL: %v", err)), nil
 		}
@@ -386,11 +433,131 @@ func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 	})
 }
 
-func downloadAndReadPDF(reader *pdf.Reader, url, pagesStr string) (string, error) {
-	// Download the PDF
-	resp, err := http.Get(url)
+// downloadAndRead fetches rawURL and returns its text: PDFs through the
+// reader, text formats as they came. The downloaded file is removed before
+// returning.
+func downloadAndRead(ctx context.Context, fetcher *urlFetcher, reader *pdf.Reader, rawURL, pagesStr string) (string, error) {
+	path, err := fetcher.download(ctx, rawURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to download PDF: %w", err)
+		return "", err
+	}
+	defer os.Remove(path)
+
+	return readDownloaded(reader, path, pagesStr)
+}
+
+// readDownloaded extracts the text of a file saved by urlFetcher.download.
+// The extension it was saved with says what it is; the reader's ReadFile only
+// understands PDFs, so text formats are read here.
+func readDownloaded(reader *pdf.Reader, path, pagesStr string) (string, error) {
+	if strings.EqualFold(filepath.Ext(path), ".pdf") {
+		if pagesStr != "" {
+			return reader.ReadFilePages(path, pagesStr)
+		}
+		return reader.ReadFile(path)
+	}
+
+	if pagesStr != "" {
+		return "", errors.New("page ranges are only supported for PDF documents; call read_url without pages to read the whole text")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read downloaded file: %w", err)
+	}
+
+	return string(data), nil
+}
+
+// urlFetcher downloads documents for read_url without letting a URL reach
+// the machine itself or its private network.
+type urlFetcher struct {
+	client *http.Client
+
+	// checkHost decides whether a host name may be contacted, before the
+	// first request and on every redirect. Production uses
+	// rejectPrivateHost; tests swap it to reach httptest servers.
+	checkHost func(ctx context.Context, host string) error
+}
+
+// newURLFetcher returns the fetcher read_url uses: every download is bounded
+// by timeout, and private addresses are refused both when the URL is checked
+// and when the connection is dialled.
+func newURLFetcher(timeout time.Duration) *urlFetcher {
+	return newGuardedFetcher(timeout, rejectPrivateHost, rejectPrivateDial)
+}
+
+// newGuardedFetcher builds a fetcher with the given checks. checkDial runs
+// on the address the dialer actually connects to, after DNS, so a name that
+// resolves to a public address at check time and to a private one at dial
+// time (DNS rebinding) is still refused; nil skips it.
+func newGuardedFetcher(timeout time.Duration, checkHost func(context.Context, string) error, checkDial func(network, address string, conn syscall.RawConn) error) *urlFetcher {
+	dialer := &net.Dialer{
+		Timeout: urlDialTimeout,
+		Control: checkDial,
+	}
+
+	// An environment proxy would make the dialer connect to the proxy, not
+	// to the target, and the dial check would judge the wrong address.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = dialer.DialContext
+
+	fetcher := &urlFetcher{checkHost: checkHost}
+	fetcher.client = &http.Client{
+		Timeout:       timeout,
+		Transport:     transport,
+		CheckRedirect: fetcher.checkRedirect,
+	}
+
+	return fetcher
+}
+
+// checkRedirect applies the same target rules to every redirect hop, so a
+// public URL cannot bounce the download to an internal one.
+func (fetcher *urlFetcher) checkRedirect(request *http.Request, via []*http.Request) error {
+	if len(via) >= maxURLRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxURLRedirects)
+	}
+
+	return fetcher.checkTarget(request.Context(), request.URL)
+}
+
+// checkTarget refuses URLs read_url must not fetch: any scheme other than
+// http and https, a missing host, and a host checkHost rejects.
+func (fetcher *urlFetcher) checkTarget(ctx context.Context, target *url.URL) error {
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return fmt.Errorf("unsupported URL scheme %q: only http and https are allowed", target.Scheme)
+	}
+
+	host := target.Hostname()
+	if host == "" {
+		return errors.New("URL has no host")
+	}
+
+	return fetcher.checkHost(ctx, host)
+}
+
+// download fetches rawURL into a temporary file whose extension matches the
+// response's content type and returns its path. The caller removes the file.
+func (fetcher *urlFetcher) download(ctx context.Context, rawURL string) (string, error) {
+	target, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+
+	if err := fetcher.checkTarget(ctx, target); err != nil {
+		return "", err
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+
+	resp, err := fetcher.client.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("failed to download document: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -398,39 +565,132 @@ func downloadAndReadPDF(reader *pdf.Reader, url, pagesStr string) (string, error
 		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
 
-	// Validate content type (allow application/pdf and application/octet-stream)
-	contentType := resp.Header.Get("Content-Type")
-	if contentType != "" &&
-		!strings.Contains(contentType, "application/pdf") &&
-		!strings.Contains(contentType, "application/octet-stream") {
-		return "", fmt.Errorf("unexpected content type: %s (expected application/pdf)", contentType)
+	extension, err := extensionForContentType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return "", err
 	}
 
-	// Create temp file
-	tmpFile, err := os.CreateTemp("", "go-docs-mcp-*.pdf")
+	tmpFile, err := os.CreateTemp("", "go-docs-mcp-*"+extension)
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
 
-	// Download with size limit
+	// Read one byte past the cap so a file of exactly 50MB is accepted and a
+	// larger one is detected without downloading the rest.
 	limited := io.LimitReader(resp.Body, maxURLFileSize+1)
-	n, err := io.Copy(tmpFile, limited)
+	written, copyErr := io.Copy(tmpFile, limited)
+	closeErr := tmpFile.Close()
+
+	switch {
+	case copyErr != nil:
+		err = fmt.Errorf("failed to download document: %w", copyErr)
+	case written > maxURLFileSize:
+		err = errors.New("document exceeds maximum size of 50MB")
+	case closeErr != nil:
+		err = fmt.Errorf("failed to save document: %w", closeErr)
+	}
 	if err != nil {
-		return "", fmt.Errorf("failed to download PDF: %w", err)
-	}
-	if n > maxURLFileSize {
-		return "", fmt.Errorf("PDF exceeds maximum size of 50MB")
+		os.Remove(tmpFile.Name())
+		return "", err
 	}
 
-	tmpFile.Close()
+	return tmpFile.Name(), nil
+}
 
-	// Extract text from the downloaded PDF
-	if pagesStr != "" {
-		return reader.ReadFilePages(tmpFile.Name(), pagesStr)
+// extensionForContentType maps a response's Content-Type to the extension
+// the download is saved with. PDFs and text are accepted; a missing type and
+// application/octet-stream are treated as PDF, as servers serving PDFs often
+// send one or the other.
+func extensionForContentType(contentType string) (string, error) {
+	if contentType == "" {
+		return ".pdf", nil
 	}
-	return reader.ReadFile(tmpFile.Name())
+
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "", fmt.Errorf("unexpected content type: %s", contentType)
+	}
+
+	switch {
+	case mediaType == "application/pdf", mediaType == "application/octet-stream":
+		return ".pdf", nil
+	case mediaType == "text/markdown", mediaType == "text/x-markdown":
+		return ".md", nil
+	case mediaType == "text/csv":
+		return ".csv", nil
+	case strings.HasPrefix(mediaType, "text/"):
+		return ".txt", nil
+	}
+
+	return "", fmt.Errorf("unexpected content type: %s (expected application/pdf or text/*)", contentType)
+}
+
+// rejectPrivateHost returns errPrivateAddress when host is localhost or
+// resolves to any address that is not public. Every resolved address must
+// pass: a name with one public and one private record could be dialled on
+// either.
+func rejectPrivateHost(ctx context.Context, host string) error {
+	lowerHost := strings.ToLower(strings.TrimSuffix(host, "."))
+	if lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".localhost") {
+		return fmt.Errorf("%w: %s", errPrivateAddress, host)
+	}
+
+	// A literal IP comes back as is, without a DNS query.
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return fmt.Errorf("cannot resolve %s: %w", host, err)
+	}
+
+	for _, address := range addresses {
+		if isNonPublicAddress(address) {
+			return fmt.Errorf("%w: %s resolves to %s", errPrivateAddress, host, address.Unmap())
+		}
+	}
+
+	return nil
+}
+
+// rejectPrivateDial is a net.Dialer Control hook: it runs with the resolved
+// address just before connecting and refuses a non-public one.
+func rejectPrivateDial(network, address string, _ syscall.RawConn) error {
+	addressPort, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return fmt.Errorf("cannot check dial address %s: %w", address, err)
+	}
+
+	if isNonPublicAddress(addressPort.Addr()) {
+		return fmt.Errorf("%w: %s", errPrivateAddress, addressPort.Addr())
+	}
+
+	return nil
+}
+
+// isNonPublicAddress reports whether address belongs to the machine or a
+// private network: RFC 1918 and IPv6 ULA, loopback, link-local (which holds
+// the 169.254.169.254 metadata endpoint), unspecified, multicast and the
+// nonPublicPrefixes. IPv4-mapped IPv6 is unmapped first so ::ffff:127.0.0.1
+// is judged as 127.0.0.1.
+func isNonPublicAddress(address netip.Addr) bool {
+	address = address.Unmap().WithZone("")
+
+	if !address.IsValid() ||
+		address.IsPrivate() ||
+		address.IsLoopback() ||
+		address.IsLinkLocalUnicast() ||
+		address.IsLinkLocalMulticast() ||
+		address.IsInterfaceLocalMulticast() ||
+		address.IsMulticast() ||
+		address.IsUnspecified() {
+		return true
+	}
+
+	for _, prefix := range nonPublicPrefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func registerListFormats(s *server.MCPServer, reader *pdf.Reader) {
