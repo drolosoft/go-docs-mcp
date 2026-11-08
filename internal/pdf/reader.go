@@ -1804,7 +1804,8 @@ func detectTableRow(line string) []string {
 
 // ConvertToMarkdown converts a document to clean Markdown format.
 // For .md files, returns raw content. For .txt/.csv, wraps in code blocks.
-// For .pdf, extracts text and formats headings. Other formats return raw text with a header.
+// For .pdf, extracts text and formats headings. The pandoc formats are
+// written by pandoc as GitHub-flavoured Markdown.
 func (r *Reader) ConvertToMarkdown(ctx context.Context, filename string) (string, error) {
 	safe, err := r.sanitizeFilename(filename)
 	if err != nil {
@@ -1814,6 +1815,10 @@ func (r *Reader) ConvertToMarkdown(ctx context.Context, filename string) (string
 	path, err := r.resolveDocument(safe)
 	if err != nil {
 		return "", err
+	}
+
+	if format, ok := pandocFormatFor(safe); ok {
+		return r.convertWithPandoc(ctx, path, format, pandocMarkdown)
 	}
 
 	ext := strings.ToLower(filepath.Ext(safe))
@@ -1848,8 +1853,9 @@ func (r *Reader) ConvertToMarkdown(ctx context.Context, filename string) (string
 		return r.pdfTextToMarkdown(text), nil
 
 	default:
-		// Other supported formats (e.g. .docx): return raw text with a header
-		text, err := r.ReadDocument(ctx, filename, 0)
+		// Anything else that passed the allowlist, an image for instance,
+		// goes through read_document's extraction with a header.
+		text, err := r.extractFull(ctx, safe, path)
 		if err != nil {
 			return "", err
 		}

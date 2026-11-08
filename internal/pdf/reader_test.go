@@ -2167,3 +2167,28 @@ func TestPandocFormats_AreListedEverywhere(t *testing.T) {
 		t.Errorf("ListDocuments listed %d files, want the %d pandoc fixtures: %+v", len(docs), len(pandocFixtureCases), docs)
 	}
 }
+
+func TestConvertToMarkdown_PandocFormatsGiveGFM(t *testing.T) {
+	pandoc := requirePandoc(t)
+
+	for _, testCase := range pandocFixtureCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			r, dir := newTestReader(t)
+			testCase.write(t, pandoc, dir, testCase.name)
+
+			got, err := r.ConvertToMarkdown(t.Context(), testCase.name)
+			if err != nil {
+				t.Fatalf("ConvertToMarkdown(%s): %v", testCase.name, err)
+			}
+			if !strings.Contains(got, testCase.wantMarkdown) {
+				t.Errorf("ConvertToMarkdown(%s) = %q, want GitHub Markdown with %q", testCase.name, got, testCase.wantMarkdown)
+			}
+
+			// The plain-text header of the old path is gone: pandoc's output
+			// is already the document as Markdown.
+			if strings.Contains(got, "> Converted from") {
+				t.Errorf("ConvertToMarkdown(%s) still wraps plain text: %q", testCase.name, got)
+			}
+		})
+	}
+}
