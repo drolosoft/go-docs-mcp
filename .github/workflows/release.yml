@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Creating the GitHub release and uploading the archives needs write access.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # GoReleaser needs the full history and the tags to find the previous
+      # release.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test -race ./...
+
+      # Take the "## [vX.Y.Z]" section of CHANGELOG.md, up to the next
+      # "## [" heading. The file goes to the runner's temp dir, because a new
+      # file inside the checkout would make GoReleaser refuse a dirty tree.
+      # A tag without its section fails here, before anything is published.
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          TAG: ${{ github.ref_name }}
+          NOTES: ${{ runner.temp }}/release-notes.md
+        run: |
+          awk -v heading="## [$TAG]" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, heading) == 1) { found = 1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > "$NOTES"
+          if ! grep -q '[^[:space:]]' "$NOTES"; then
+            echo "CHANGELOG.md has no section for $TAG"
+            exit 1
+          fi
+          cat "$NOTES"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean --release-notes ${{ runner.temp }}/release-notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
