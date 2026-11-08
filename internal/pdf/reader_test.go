@@ -679,6 +679,48 @@ func TestExtractTables_CSVWithQuotedFields(t *testing.T) {
 	}
 }
 
+func TestExtractTables_CSVWithQuotedNewline(t *testing.T) {
+	r, dir := newTestReader(t)
+
+	// A quoted field may hold a line break; it is one cell of one record,
+	// not the end of the row.
+	content := "name,address\n\"Alice\",\"12 Main St\nSpringfield\"\nBob,LA\n"
+	writeFile(t, dir, "addresses.csv", content)
+
+	tables, err := r.ExtractTables(t.Context(), "addresses.csv", 0)
+	if err != nil {
+		t.Fatalf("ExtractTables(.csv with a quoted newline) error: %v", err)
+	}
+
+	if len(tables) != 1 || len(tables[0].Rows) != 3 {
+		t.Fatalf("want 1 table with 3 rows, got %+v", tables)
+	}
+	if got := tables[0].Rows[1][1]; got != "12 Main St\nSpringfield" {
+		t.Errorf("quoted multi-line field = %q, want %q", got, "12 Main St\nSpringfield")
+	}
+	if got := tables[0].Rows[2]; len(got) != 2 || got[0] != "Bob" || got[1] != "LA" {
+		t.Errorf("row after the multi-line field = %v, want [Bob LA]", got)
+	}
+}
+
+func TestExtractTables_CSVTrimsCellsAndAllowsRaggedRows(t *testing.T) {
+	r, dir := newTestReader(t)
+
+	// The hand-rolled splitter trimmed every cell and took rows of any
+	// length; encoding/csv must keep both.
+	writeFile(t, dir, "ragged.csv", " a , b , c \nsingle\n")
+
+	tables, err := r.ExtractTables(t.Context(), "ragged.csv", 0)
+	if err != nil {
+		t.Fatalf("ExtractTables(ragged .csv) error: %v", err)
+	}
+
+	rows := tables[0].Rows
+	if len(rows) != 2 || strings.Join(rows[0], "|") != "a|b|c" || strings.Join(rows[1], "|") != "single" {
+		t.Errorf("rows = %q, want [[a b c] [single]]", rows)
+	}
+}
+
 func TestExtractTables_MarkdownPipeTable(t *testing.T) {
 	r, dir := newTestReader(t)
 
@@ -1040,38 +1082,6 @@ func TestMatchNumberedHeading(t *testing.T) {
 			got := matchNumberedHeading(tc.line)
 			if got != tc.expected {
 				t.Errorf("matchNumberedHeading(%q) = %d, want %d", tc.line, got, tc.expected)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 14. splitCSVLine (internal function — unit test)
-// ---------------------------------------------------------------------------
-
-func TestSplitCSVLine(t *testing.T) {
-	tests := []struct {
-		line     string
-		expected []string
-	}{
-		{"a,b,c", []string{"a", "b", "c"}},
-		{`"hello, world",foo,bar`, []string{"hello, world", "foo", "bar"}},
-		{`"a""b",c`, []string{`a"b`, "c"}},
-		{" a , b , c ", []string{"a", "b", "c"}},
-		{"single", []string{"single"}},
-		{"", []string{""}},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.line, func(t *testing.T) {
-			got := splitCSVLine(tc.line)
-			if len(got) != len(tc.expected) {
-				t.Fatalf("splitCSVLine(%q) = %v (len %d), want %v (len %d)", tc.line, got, len(got), tc.expected, len(tc.expected))
-			}
-			for i := range got {
-				if got[i] != tc.expected[i] {
-					t.Errorf("splitCSVLine(%q)[%d] = %q, want %q", tc.line, i, got[i], tc.expected[i])
-				}
 			}
 		})
 	}

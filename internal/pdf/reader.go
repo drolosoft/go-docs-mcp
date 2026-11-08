@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -1493,52 +1494,38 @@ func (r *Reader) ExtractTables(ctx context.Context, filename string, page int) (
 	}
 }
 
-// tablesCSV parses the entire CSV file as a single table.
+// tablesCSV parses the entire CSV file as a single table with encoding/csv,
+// so a quoted field may hold commas, doubled quotes and line breaks. Rows may
+// have different lengths and every cell is trimmed, as the table of a
+// hand-written CSV usually needs.
 func (r *Reader) tablesCSV(path string) ([]TableData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", withoutPath(err))
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) == 0 {
-		return []TableData{}, nil
+	csvReader := csv.NewReader(bytes.NewReader(data))
+	csvReader.FieldsPerRecord = -1
+
+	// A stray quote inside an unquoted field is common in exported files;
+	// LazyQuotes keeps it as text instead of refusing the whole table.
+	csvReader.LazyQuotes = true
+
+	records, err := csvReader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CSV: %w", err)
 	}
 
-	var rows [][]string
-	for _, line := range lines {
-		// Simple CSV parsing (handles basic cases)
-		cells := splitCSVLine(line)
+	rows := [][]string{}
+	for _, record := range records {
+		cells := make([]string, len(record))
+		for index, field := range record {
+			cells[index] = strings.TrimSpace(field)
+		}
 		rows = append(rows, cells)
 	}
 
 	return []TableData{{Page: 1, Rows: rows}}, nil
-}
-
-// splitCSVLine splits a CSV line respecting quoted fields.
-func splitCSVLine(line string) []string {
-	var fields []string
-	var current strings.Builder
-	inQuotes := false
-
-	for i := 0; i < len(line); i++ {
-		ch := line[i]
-		if ch == '"' {
-			if inQuotes && i+1 < len(line) && line[i+1] == '"' {
-				current.WriteByte('"')
-				i++
-			} else {
-				inQuotes = !inQuotes
-			}
-		} else if ch == ',' && !inQuotes {
-			fields = append(fields, strings.TrimSpace(current.String()))
-			current.Reset()
-		} else {
-			current.WriteByte(ch)
-		}
-	}
-	fields = append(fields, strings.TrimSpace(current.String()))
-	return fields
 }
 
 // tablesMarkdown parses pipe-delimited tables from a markdown file.
