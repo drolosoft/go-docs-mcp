@@ -742,15 +742,37 @@ func newURLFetcher(timeout time.Duration) *urlFetcher {
 // resolves to a public address at check time and to a private one at dial
 // time (DNS rebinding) is still refused; nil skips it.
 func newGuardedFetcher(timeout time.Duration, checkHost func(context.Context, string) error, checkDial func(network, address string, conn syscall.RawConn) error) *urlFetcher {
+	return newFetcherWithProxy(timeout, checkHost, checkDial, urlProxyAllowed())
+}
+
+// urlProxyAllowed reports whether DOCS_MCP_URL_PROXY asks read_url to honour
+// HTTP_PROXY, HTTPS_PROXY and NO_PROXY. It is off unless set, because with a
+// proxy the socket goes to the proxy and the connect-time address check can
+// no longer see the real target; only the DNS check on the target host stays.
+func urlProxyAllowed() bool {
+	allowed, err := strconv.ParseBool(os.Getenv("DOCS_MCP_URL_PROXY"))
+	return err == nil && allowed
+}
+
+// newFetcherWithProxy builds the fetcher behind newGuardedFetcher. With
+// useProxy the transport follows the environment proxy and the dial check is
+// dropped, since every connection then goes to the proxy, usually on a
+// private address that the check would refuse.
+func newFetcherWithProxy(timeout time.Duration, checkHost func(context.Context, string) error, checkDial func(network, address string, conn syscall.RawConn) error, useProxy bool) *urlFetcher {
 	dialer := &net.Dialer{
 		Timeout: urlDialTimeout,
 		Control: checkDial,
 	}
 
 	// An environment proxy would make the dialer connect to the proxy, not
-	// to the target, and the dial check would judge the wrong address.
+	// to the target, and the dial check would judge the wrong address. So
+	// the proxy is off by default and, when asked for, the dial check is.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
+	if useProxy {
+		transport.Proxy = http.ProxyFromEnvironment
+		dialer.Control = nil
+	}
 	transport.DialContext = dialer.DialContext
 
 	fetcher := &urlFetcher{checkHost: checkHost}

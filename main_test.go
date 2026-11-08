@@ -1055,3 +1055,60 @@ func TestOCRDocumentReportsProgress(t *testing.T) {
 		t.Fatalf("progress without a token = %+v, want none", got)
 	}
 }
+
+func TestDownloadThroughProxyWhenAllowed(t *testing.T) {
+	// A forward proxy for plain http: it receives the absolute URL the
+	// client wants and answers in its place, recording what was asked.
+	var proxied atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Host != "docs.example.invalid" {
+			t.Errorf("proxy asked for %s, want docs.example.invalid", r.URL.Host)
+		}
+		proxied.Add(1)
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "through the proxy")
+	}))
+	defer proxy.Close()
+
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+
+	// The proxy listens on loopback, which the dial check would refuse: the
+	// opt-in has to drop that check or no proxy could ever work.
+	fetcher := newFetcherWithProxy(time.Second, allowAnyHost, rejectPrivateDial, true)
+
+	path, err := fetcher.download(context.Background(), "http://docs.example.invalid/notes.txt")
+	if err != nil {
+		t.Fatalf("download through the proxy failed: %v", err)
+	}
+	defer os.Remove(path)
+
+	if proxied.Load() != 1 {
+		t.Fatalf("the proxy was used %d times, want 1", proxied.Load())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "through the proxy" {
+		t.Fatalf("downloaded %q, %v", data, err)
+	}
+}
+
+func TestProxyIsIgnoredByDefault(t *testing.T) {
+	var proxied atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxied.Add(1)
+	}))
+	defer proxy.Close()
+
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("DOCS_MCP_URL_PROXY", "")
+
+	// Without the opt-in the request must not go to the proxy. The target
+	// does not resolve, so the download fails, but the proxy stays untouched.
+	fetcher := newGuardedFetcher(time.Second, allowAnyHost, rejectPrivateDial)
+	if _, err := fetcher.download(context.Background(), "http://docs.example.invalid/notes.txt"); err == nil {
+		t.Fatal("download of an unresolvable host succeeded")
+	}
+	if proxied.Load() != 0 {
+		t.Fatalf("the proxy was contacted %d times without DOCS_MCP_URL_PROXY", proxied.Load())
+	}
+}

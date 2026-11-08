@@ -167,6 +167,7 @@ Go-Docs MCP reads documents from a configured directory. Set `DOCS_MCP_DIR` to c
 | `DOCS_MCP_OCR_LANG` | `eng` | Tesseract language used when a call brings none |
 | `DOCS_MCP_CACHE_MB` | `256` | Upper bound of the in-memory text cache; least recently used documents are evicted first, `0` turns it off |
 | `DOCS_MCP_DISABLE_URL` | _(unset)_ | Set to `1` to remove the `read_url` tool |
+| `DOCS_MCP_URL_PROXY` | _(unset)_ | Set to `1` to let `read_url` honour `HTTP_PROXY`/`HTTPS_PROXY`. Off by default: with a proxy the connect-time address check cannot see the real target |
 
 Place your documents in the directory and the server finds them automatically. All supported formats are detected.
 
@@ -502,7 +503,7 @@ Extracts text from an image file using OCR. Supports PNG, JPG, WebP, TIFF and BM
 - **Extension filter** — only supported formats are served.
 - **Read-only** — the server never writes inside `DOCS_MCP_DIR`, and every tool is announced to clients as read-only, non-destructive and idempotent.
 - **Timeouts on every external process** — poppler, tesseract and pandoc run under a context deadline (60 s per extraction, 120 s per OCR page, 10 min per OCR call) and are killed when it passes. Page ranges are checked against the real page count and capped at 200 pages per call.
-- **`read_url`** — 60 s timeout, 50MB limit, `application/pdf` or `text/*` only, temp files removed right after reading. Hosts that resolve to private, loopback, link-local or cloud metadata addresses are refused, on the first request and on every redirect. Set `DOCS_MCP_DISABLE_URL=1` to drop the tool from the server if your documents may contain untrusted instructions.
+- **`read_url`** — 60 s timeout, 50MB limit, `application/pdf` or `text/*` only, temp files removed right after reading. Hosts that resolve to private, loopback, link-local or cloud metadata addresses are refused, on the first request and on every redirect. Set `DOCS_MCP_DISABLE_URL=1` to drop the tool from the server if your documents may contain untrusted instructions. Environment proxies are ignored unless `DOCS_MCP_URL_PROXY=1`, because behind a proxy the connect-time check would judge the proxy, not the target.
 - **Bounded results** — text tools return pages of at most 200,000 characters, search shows at most 500 matches and images stop at 8 MB per call; any tool result over 9 MB is replaced with an error. The text cache is capped by `DOCS_MCP_CACHE_MB`.
 - **Error messages** carry file names, never absolute paths of the host.
 
