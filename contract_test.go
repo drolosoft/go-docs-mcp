@@ -45,6 +45,23 @@ var expectedToolNames = []string{
 	"search_document",
 }
 
+// expectedStructuredTools are the tools that must advertise an outputSchema
+// and answer with structuredContent, sorted.
+var expectedStructuredTools = []string{
+	"extract_tables",
+	"get_document_metadata",
+	"get_document_outline",
+	"list_documents",
+	"list_formats",
+}
+
+// expectedResourceURIs are the fixtures as resources/list must name them,
+// sorted.
+var expectedResourceURIs = []string{
+	"docs://notas.txt",
+	"docs://prueba.md",
+}
+
 // The binary is built with -buildvcs=false, so its module version is
 // "(devel)" and serverVersion() reports "dev". Any other value means the
 // serverInfo no longer comes from version.go.
@@ -133,8 +150,9 @@ func connect(t *testing.T, opts ...client.ClientOption) (*client.Client, *mcp.In
 }
 
 // exerciseServer checks the negotiated version and the server identity, the
-// exact tool surface, and three real calls: a listing, a conversion and a
-// path traversal that must fail as a tool error.
+// exact tool surface with its output schemas, three real calls (a listing, a
+// conversion and a path traversal that must fail as a tool error) and the
+// document resources.
 func exerciseServer(t *testing.T, mcpClient *client.Client, initResult *mcp.InitializeResult, wantVersion string) {
 	t.Helper()
 
@@ -157,12 +175,26 @@ func exerciseServer(t *testing.T, mcpClient *client.Client, initResult *mcp.Init
 	}
 
 	toolNames := make([]string, 0, len(tools.Tools))
+	structuredNames := []string{}
 	for _, tool := range tools.Tools {
 		toolNames = append(toolNames, tool.Name)
+
+		if tool.OutputSchema.Type == "object" {
+			structuredNames = append(structuredNames, tool.Name)
+		}
 	}
 	slices.Sort(toolNames)
 	if !slices.Equal(toolNames, expectedToolNames) {
 		t.Fatalf("tools/list names =\n  %v\nwant\n  %v", toolNames, expectedToolNames)
+	}
+
+	slices.Sort(structuredNames)
+	if !slices.Equal(structuredNames, expectedStructuredTools) {
+		t.Fatalf("tools with an outputSchema =\n  %v\nwant\n  %v", structuredNames, expectedStructuredTools)
+	}
+
+	if !strings.Contains(initResult.Instructions, "list_documents") {
+		t.Errorf("initialize carries no instructions: %q", initResult.Instructions)
 	}
 
 	// list_documents must see both fixtures.
@@ -175,6 +207,16 @@ func exerciseServer(t *testing.T, mcpClient *client.Client, initResult *mcp.Init
 	listing := firstText(t, result)
 	if !strings.Contains(listing, "prueba.md") || !strings.Contains(listing, "notas.txt") {
 		t.Fatalf("list_documents did not list fixtures: %s", listing)
+	}
+
+	// The same listing arrives as structuredContent, an object whose
+	// documents list has both fixtures.
+	structured, ok := result.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("list_documents structuredContent = %#v, want an object", result.StructuredContent)
+	}
+	if documents, _ := structured["documents"].([]any); len(documents) != 2 {
+		t.Fatalf("list_documents structuredContent = %#v, want two documents", structured)
 	}
 
 	// convert_to_markdown reads a text-format file end to end.
@@ -200,6 +242,52 @@ func exerciseServer(t *testing.T, mcpClient *client.Client, initResult *mcp.Init
 	}
 	if !result.IsError {
 		t.Fatalf("read_document with traversal path should be a tool error, got %+v", result)
+	}
+
+	exerciseResources(t, mcpClient)
+}
+
+// exerciseResources lists the documents as resources and reads one back by
+// its docs:// URI, the path Claude Code takes for an @-mention.
+func exerciseResources(t *testing.T, mcpClient *client.Client) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	resources, err := mcpClient.ListResources(ctx, mcp.ListResourcesRequest{})
+	if err != nil {
+		t.Fatalf("resources/list: %v", err)
+	}
+
+	uris := make([]string, 0, len(resources.Resources))
+	for _, resource := range resources.Resources {
+		uris = append(uris, resource.URI)
+	}
+	slices.Sort(uris)
+	if !slices.Equal(uris, expectedResourceURIs) {
+		t.Fatalf("resources/list uris =\n  %v\nwant\n  %v", uris, expectedResourceURIs)
+	}
+
+	readRequest := mcp.ReadResourceRequest{}
+	readRequest.Params.URI = "docs://prueba.md"
+	read, err := mcpClient.ReadResource(ctx, readRequest)
+	if err != nil {
+		t.Fatalf("resources/read: %v", err)
+	}
+	if len(read.Contents) != 1 {
+		t.Fatalf("resources/read returned %d contents, want 1", len(read.Contents))
+	}
+
+	text, ok := mcp.AsTextResourceContents(read.Contents[0])
+	if !ok || text.MIMEType != "text/markdown" || !strings.Contains(text.Text, "Dual-era contract fixture") {
+		t.Fatalf("resources/read docs://prueba.md = %+v", read.Contents[0])
+	}
+
+	// A name outside the directory is a protocol error, not a file.
+	outsideRequest := mcp.ReadResourceRequest{}
+	outsideRequest.Params.URI = "docs://..%2Fescape.txt"
+	if _, err := mcpClient.ReadResource(ctx, outsideRequest); err == nil {
+		t.Fatal("resources/read of a path outside the directory succeeded")
 	}
 }
 
