@@ -29,9 +29,10 @@ DOCS_MCP_DIR=~/docs ./go-docs-mcp   # custom dir
 - Env vars: `DOCS_MCP_DIR` (primary), `PDF_MCP_DIR` (backward compat), `DROLO_DOCS_DIR` (legacy), `DOCS_MCP_OCR_LANG` (tesseract language, default `eng`), `DOCS_MCP_DISABLE_URL`, `DOCS_MCP_CACHE_MB` (text cache cap)
 - Default directory: `~/.docs-mcp/documents/`
 - Text tools page their output: `offset` + `max_chars` (default 50000, cap 200000) with a trailer naming the next offset; `search_document` has `max_results`; `extract_images` returns PNG image content, skips masks, scales to 1600 px, 8 MB budget
-- Structured output (`outputSchema` + `structuredContent`) on list_documents, list_formats, get_document_metadata, get_document_outline, extract_tables; text JSON kept for old clients
+- Structured output (`outputSchema` + `structuredContent`) on list_documents, list_formats, get_document_metadata, get_document_outline, extract_tables (text JSON kept for old clients), and on the paged read_document, convert_to_markdown and ocr_document (`text`, `next_offset`, `total_chars`)
 - URL downloads: 60 s timeout, 50MB cap, `application/pdf` or `text/*`, private/loopback/link-local hosts refused on every hop
-- Image extraction limited to `max_images` (default 10) per call and 8 MB per answer
+- Image extraction: `pdfimages -list` first, only rows of type `image` (soft masks skipped), `-png`, box-filtered to 1600 px, 4 MB per image, `max_images` (default 10) and 8 MB per answer
+- Tool results over 9 MB are replaced with an error (`server.WithToolResultSizeLimit`)
 - Supports: PDF, TXT, MD, CSV, and through pandoc DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, IPYNB; images (PNG, JPG, WebP, TIFF, BMP) with tesseract
 
 ## Tools
@@ -40,7 +41,7 @@ DOCS_MCP_DIR=~/docs ./go-docs-mcp   # custom dir
 |------|--------|-------|
 | `list_documents` | none | Scans docsDir for supported files and images, returns JSON array with `type` |
 | `read_document` | `filename` (req), `page`, `pages`, `offset`, `max_chars` (opt) | Full text, single page, or page ranges, paged |
-| `search_document` | `filename` (req), `query` (req), `max_results` (opt) | Case-insensitive, 2-line context |
+| `search_document` | `filename` (req), `query` (req), `max_results` (opt) | Case-insensitive, 2-line context, 50 matches default, 500 max |
 | `get_document_summary` | `filename` (req) | First 3 pages |
 | `get_document_metadata` | `filename` (req) | Full PDF metadata via pdfinfo |
 | `extract_images` | `filename` (req), `page`, `max_images` (opt) | PNG image content, masks skipped, 1600 px, 8 MB |

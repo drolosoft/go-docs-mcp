@@ -20,20 +20,23 @@ parameters are optional and the structured results keep their text form.
   WebP joins the image formats.
 - Paging: `offset` and `max_chars` (default 50000, cap 200000) on
   `read_document`, `convert_to_markdown` and `ocr_document`, with a trailer
-  that names the next offset; `max_results` (default 50) on
-  `search_document`; `max_images` on `extract_images`. A 1 MB limit on any
-  tool result as the last line of defence.
+  that names the next offset; `max_results` (default 50, cap 500) on
+  `search_document`; `max_images` (default 10, cap 50) on `extract_images`.
+  A 9 MB limit on any tool result as the last line of defence, above the
+  8 MB image budget because mcp-go applies one limit to every tool.
 - Structured output (`outputSchema` and `structuredContent`) on
   `list_documents`, `list_formats`, `get_document_metadata`,
-  `get_document_outline` and `extract_tables`.
+  `get_document_outline` and `extract_tables`, and on the paged
+  `read_document`, `convert_to_markdown` and `ocr_document`, whose page
+  carries `text`, `next_offset` and `total_chars`.
 - Resources: every document is a `docs://{filename}` resource, listed on
   every `resources/list`, so Claude Code can @-mention documents.
 - Server instructions that tell the model the recommended order: list,
   outline, search, then read by pages.
 - Progress notifications from `ocr_document` when the call carries a
   progress token.
-- `DOCS_MCP_CACHE_MB` (default 256): the text cache is bounded and evicts
-  the least recently used document.
+- `DOCS_MCP_CACHE_MB` (default 256, 0 turns it off): the text cache is
+  bounded and evicts the least recently used document.
 - CI on GitHub Actions (gofmt, vet, race tests with poppler, tesseract and
   pandoc, govulncheck, on Ubuntu and macOS), Dependabot, a release workflow
   with goreleaser (macOS, Linux, Windows archives and checksums), a Homebrew

@@ -165,7 +165,7 @@ Go-Docs MCP reads documents from a configured directory. Set `DOCS_MCP_DIR` to c
 | `DOCS_MCP_DIR` | `~/.docs-mcp/documents/` | Directory containing documents to serve |
 | `PDF_MCP_DIR` | _(legacy alias)_ | Backward-compatible alias for `DOCS_MCP_DIR` |
 | `DOCS_MCP_OCR_LANG` | `eng` | Tesseract language used when a call brings none |
-| `DOCS_MCP_CACHE_MB` | `256` | Upper bound of the in-memory text cache; least recently used documents are evicted first |
+| `DOCS_MCP_CACHE_MB` | `256` | Upper bound of the in-memory text cache; least recently used documents are evicted first, `0` turns it off |
 | `DOCS_MCP_DISABLE_URL` | _(unset)_ | Set to `1` to remove the `read_url` tool |
 
 Place your documents in the directory and the server finds them automatically. All supported formats are detected.
@@ -281,6 +281,8 @@ Lists all supported document formats and their dependency status.
 
 Reads the extracted text content of a document. Automatically falls back to OCR if the document is image-based/scanned and `pdftotext` returns empty text.
 
+Long texts come in pages. A page that does not reach the end finishes with `[truncated: showing chars 0-50000 of 123456; call again with offset=50000]`, and the structured result carries `text`, `next_offset` (absent on the last page) and `total_chars`. Offsets count characters, not bytes.
+
 **Parameters:**
 
 | Name | Type | Required | Description |
@@ -291,7 +293,7 @@ Reads the extracted text content of a document. Automatically falls back to OCR 
 | `offset` | number | No | Character offset to start from (default 0). |
 | `max_chars` | number | No | Characters to return (default 50000, at most 200000). |
 
-When the text is longer than `max_chars`, the result ends with a line that says how many characters there are and which `offset` to pass next. `convert_to_markdown` and `ocr_document` take the same two parameters.
+`convert_to_markdown` and `ocr_document` take the same two parameters.
 
 **Example input:**
 ```json
@@ -313,7 +315,7 @@ Searches within a document for lines matching a query. Returns matches with 2 li
 |------|------|----------|-------------|
 | `filename` | string | Yes | The document filename to search |
 | `query` | string | Yes | Search query (case-insensitive) |
-| `max_results` | number | No | Upper bound of matches returned (default 50). |
+| `max_results` | number | No | Matches to show (default 50, at most 500). The header still counts all of them. |
 
 **Example output:**
 ```
@@ -394,7 +396,7 @@ Extracts tables from a document as structured data.
 
 ### `extract_images`
 
-Extracts the images of a PDF and returns each one as MCP image content (`image/png`), so clients that render images show them. Alpha masks and stencil masks are skipped, images are scaled down to 1600 px on the longer side, and the whole answer stays under 8 MB.
+Extracts the images of a PDF and returns each one as MCP image content (`image/png`), so clients that render images show them. Alpha masks and stencil masks are skipped, images are scaled down to 1600 px on the longer side, an image still over 4 MB after scaling is shrunk until it fits, and the images of one answer stay under 8 MB. A text item before the images describes them and says why any was left out.
 
 **Parameters:**
 
@@ -402,7 +404,27 @@ Extracts the images of a PDF and returns each one as MCP image content (`image/p
 |------|------|----------|-------------|
 | `filename` | string | Yes | The document filename to extract images from |
 | `page` | number | No | Specific page to extract from. Omit for all pages. |
-| `max_images` | number | No | Upper bound of images returned (default 10). |
+| `max_images` | number | No | Images to return (default 10, at most 50). |
+
+**Example output:** a text item that describes the images, then one `image/png` item per image.
+```json
+{
+  "images": [
+    {
+      "page": 1,
+      "index": 0,
+      "format": "png",
+      "mime_type": "image/png",
+      "width": 1600,
+      "height": 1200,
+      "original_width": 2048,
+      "original_height": 1536
+    }
+  ],
+  "found": 3,
+  "notes": ["returned the first 1 of 3 images; raise max_images or ask for one page to see the others"]
+}
+```
 
 ---
 
@@ -481,6 +503,7 @@ Extracts text from an image file using OCR. Supports PNG, JPG, WebP, TIFF and BM
 - **Read-only** — the server never writes inside `DOCS_MCP_DIR`, and every tool is announced to clients as read-only, non-destructive and idempotent.
 - **Timeouts on every external process** — poppler, tesseract and pandoc run under a context deadline (60 s per extraction, 120 s per OCR page, 10 min per OCR call) and are killed when it passes. Page ranges are checked against the real page count and capped at 200 pages per call.
 - **`read_url`** — 60 s timeout, 50MB limit, `application/pdf` or `text/*` only, temp files removed right after reading. Hosts that resolve to private, loopback, link-local or cloud metadata addresses are refused, on the first request and on every redirect. Set `DOCS_MCP_DISABLE_URL=1` to drop the tool from the server if your documents may contain untrusted instructions.
+- **Bounded results** — text tools return pages of at most 200,000 characters, search shows at most 500 matches and images stop at 8 MB per call; any tool result over 9 MB is replaced with an error. The text cache is capped by `DOCS_MCP_CACHE_MB`.
 - **Error messages** carry file names, never absolute paths of the host.
 
 How to report a problem is in [SECURITY.md](SECURITY.md).
