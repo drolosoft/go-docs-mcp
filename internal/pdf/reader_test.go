@@ -24,7 +24,7 @@ import (
 )
 
 // newTestReader creates a Reader pointing at a temp directory with test files.
-func newTestReader(t *testing.T) (*Reader, string) {
+func newTestReader(t testing.TB) (*Reader, string) {
 	t.Helper()
 	dir := t.TempDir()
 	r := NewReader(dir)
@@ -2764,7 +2764,7 @@ type imageFixture struct {
 // XObject fixture.draws times. The image carries a soft mask, which
 // pdfimages lists and extracts as a second "smask" image, so tests can check
 // that the mask is never returned as a picture.
-func writeImagePDF(t *testing.T, path string, fixture imageFixture) {
+func writeImagePDF(t testing.TB, path string, fixture imageFixture) {
 	t.Helper()
 
 	pixels := make([]byte, fixture.width*fixture.height*3)
@@ -2829,7 +2829,7 @@ func writeImagePDF(t *testing.T, path string, fixture imageFixture) {
 }
 
 // deflateBytes compresses data with zlib, the PDF FlateDecode filter.
-func deflateBytes(t *testing.T, data []byte) []byte {
+func deflateBytes(t testing.TB, data []byte) []byte {
 	t.Helper()
 
 	var compressed bytes.Buffer
@@ -3065,5 +3065,29 @@ func TestBoxResample_AveragesTheCoveredPixels(t *testing.T) {
 	}
 	if !slices.Equal(mixed.Pix, []uint8{128, 0, 128, 255}) {
 		t.Errorf("colour pixel = %v, want [128 0 128 255]", mixed.Pix)
+	}
+}
+
+// BenchmarkExtractImages_NoisyPhoto extracts one 2048x2048 RGB image of
+// noise with a soft mask, the worst case for the PNG step: noise does not
+// compress, so every encoder spends its longest time on it. Run it with
+// -benchtime=1x when only the wall time of one call matters.
+func BenchmarkExtractImages_NoisyPhoto(b *testing.B) {
+	r, dir := newTestReader(b)
+	if _, err := exec.LookPath(r.pdfimagesBin); err != nil {
+		b.Skip("pdfimages (poppler) is not installed")
+	}
+
+	path := filepath.Join(dir, "photo.pdf")
+	writeImagePDF(b, path, imageFixture{width: 2048, height: 2048, draws: 1, noise: true})
+
+	for b.Loop() {
+		extraction, err := r.ExtractImages(b.Context(), "photo.pdf", 0, DefaultMaxImages)
+		if err != nil {
+			b.Fatalf("ExtractImages: %v", err)
+		}
+		if len(extraction.Images) != 1 {
+			b.Fatalf("returned %d images, want 1 (notes %q)", len(extraction.Images), extraction.Notes)
+		}
 	}
 }
