@@ -1,6 +1,7 @@
 package pdf
 
 import (
+	"bufio"
 	"bytes"
 	"container/list"
 	"context"
@@ -1638,9 +1639,13 @@ func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page, m
 	// long document does not have every image written to disk for ten of
 	// them. The first page is the listing's, which keeps pdfimages' image
 	// numbers the same in both runs.
+	//
+	// Without -png, pdfimages writes PNM, which is decoded and encoded as
+	// PNG here. Its own PNG writer tries every row filter at the highest
+	// compression, and on a 2048 px photo that took several times longer
+	// than writing PNM and doing the rest in Go.
 	lastPage := selected[len(selected)-1].page
-	extractArgs := append([]string{"-png"}, firstPageArgs...)
-	extractArgs = append(extractArgs, "-l", strconv.Itoa(lastPage), path, prefix)
+	extractArgs := append(slices.Clone(firstPageArgs), "-l", strconv.Itoa(lastPage), path, prefix)
 
 	if _, err := runTool(ctx, toolTimeout, nil, path, r.pdfimagesBin, extractArgs...); err != nil {
 		return nil, err
@@ -1653,7 +1658,7 @@ func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page, m
 			return nil, err
 		}
 
-		info, err := preparePNG(fmt.Sprintf("%s-%03d.png", prefix, picture.number), picture)
+		info, err := preparePicture(prefix, picture)
 		if err != nil {
 			extraction.Notes = append(extraction.Notes, fmt.Sprintf("image %d on page %d was left out: %v", picture.number, picture.page, err))
 			continue
@@ -1671,56 +1676,57 @@ func (r *Reader) extractImagesFromPath(ctx context.Context, path string, page, m
 	return extraction, nil
 }
 
-// preparePNG reads the PNG pdfimages wrote for picture and returns it as an
-// ImageInfo, scaled to MaxImageSide on the longer side and shrunk further
-// while its base64 is over maxImageBytes. A PNG that is already small enough
-// goes out as pdfimages wrote it, without decoding.
-func preparePNG(filePath string, picture listedImage) (ImageInfo, error) {
-	data, err := os.ReadFile(filePath)
+// pnmExtensions are the files pdfimages writes when it is not asked for
+// PNG: PPM for colour and grey, PBM for one bit a pixel, and PGM, which
+// poppler 25 does not write for pictures but older releases may.
+var pnmExtensions = []string{".ppm", ".pbm", ".pgm"}
+
+// preparePicture reads the PNM pdfimages wrote for picture under prefix and
+// returns it as a PNG ImageInfo, scaled to MaxImageSide on the longer side
+// and shrunk further while its base64 is over maxImageBytes.
+func preparePicture(prefix string, picture listedImage) (ImageInfo, error) {
+	file, err := openPNM(prefix, picture.number)
 	if err != nil {
-		return ImageInfo{}, fmt.Errorf("pdfimages did not write it as PNG: %w", withoutPath(err))
+		return ImageInfo{}, fmt.Errorf("pdfimages did not write it as PNM: %w", withoutPath(err))
+	}
+	defer file.Close()
+
+	decoded, err := decodePNM(file)
+	if err != nil {
+		return ImageInfo{}, err
 	}
 
-	config, err := png.DecodeConfig(bytes.NewReader(data))
-	if err != nil {
-		return ImageInfo{}, fmt.Errorf("unreadable PNG: %w", err)
-	}
-
+	bounds := decoded.Bounds()
 	info := ImageInfo{
 		Page:           picture.page,
 		Index:          picture.number,
 		Format:         "png",
 		MIMEType:       "image/png",
-		OriginalWidth:  config.Width,
-		OriginalHeight: config.Height,
-	}
-
-	width, height := scaledSize(config.Width, config.Height, MaxImageSide)
-	if width == config.Width && height == config.Height && base64.StdEncoding.EncodedLen(len(data)) <= maxImageBytes {
-		info.Width = width
-		info.Height = height
-		info.DataBase64 = base64.StdEncoding.EncodeToString(data)
-		return info, nil
-	}
-
-	if config.Width*config.Height > maxDecodePixels {
-		return ImageInfo{}, fmt.Errorf("%dx%d pixels is too large to decode", config.Width, config.Height)
-	}
-
-	decoded, err := png.Decode(bytes.NewReader(data))
-	if err != nil {
-		return ImageInfo{}, fmt.Errorf("unreadable PNG: %w", err)
+		OriginalWidth:  bounds.Dx(),
+		OriginalHeight: bounds.Dy(),
 	}
 
 	// Every attempt scales the original again, a quarter smaller than the
-	// last, so the quality does not degrade from resampling a resample.
+	// last, so the quality does not degrade from resampling a resample. The
+	// first attempt always runs, so an icon under minImageSide still goes
+	// out at its own size.
+	width, height := scaledSize(bounds.Dx(), bounds.Dy(), MaxImageSide)
 	longest := max(width, height)
 
-	for longest >= minImageSide {
-		width, height = scaledSize(config.Width, config.Height, longest)
+	for {
+		width, height = scaledSize(bounds.Dx(), bounds.Dy(), longest)
 
+		scaled := decoded
+		if width != bounds.Dx() || height != bounds.Dy() {
+			scaled = boxResample(decoded, width, height)
+		}
+
+		// DefaultCompression on purpose: png.BestSpeed encodes a 1600 px
+		// photo about a fifth faster, but next to pdfimages and the file
+		// I/O the whole call did not get measurably faster, and the PNG
+		// grew by 4 %.
 		var encoded bytes.Buffer
-		if err := png.Encode(&encoded, boxResample(decoded, width, height)); err != nil {
+		if err := png.Encode(&encoded, scaled); err != nil {
 			return ImageInfo{}, fmt.Errorf("failed to encode PNG: %w", err)
 		}
 
@@ -1732,9 +1738,29 @@ func preparePNG(filePath string, picture listedImage) (ImageInfo, error) {
 		}
 
 		longest = longest * 3 / 4
+		if longest < minImageSide {
+			return ImageInfo{}, fmt.Errorf("does not fit in %d MB even at %d px", maxImageBytes>>20, minImageSide)
+		}
+	}
+}
+
+// openPNM opens the file pdfimages wrote for image number under prefix,
+// whichever of the PNM extensions it has.
+func openPNM(prefix string, number int) (*os.File, error) {
+	var lastErr error
+
+	for _, extension := range pnmExtensions {
+		file, err := os.Open(fmt.Sprintf("%s-%03d%s", prefix, number, extension))
+		if err == nil {
+			return file, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		lastErr = err
 	}
 
-	return ImageInfo{}, fmt.Errorf("does not fit in %d MB even at %d px", maxImageBytes>>20, minImageSide)
+	return nil, lastErr
 }
 
 // scaledSize returns width and height scaled so the longer side is at most
@@ -1832,6 +1858,255 @@ func boxAverage(source, target pixelPlane, channels int) {
 			}
 		}
 	}
+}
+
+// maxPNMHeaderNumber caps every number in a PNM header. A crafted file can
+// write any number of digits, and 16 million is far above the side of any
+// real picture while width times height still fits in an int.
+const maxPNMHeaderNumber = 1 << 24
+
+// pnmHeader is the header of a binary PNM file: its magic number ("P4",
+// "P5" or "P6"), its size, and maxval, the value of a full-intensity
+// sample (1 for a PBM).
+type pnmHeader struct {
+	magic  string
+	width  int
+	height int
+	maxval int
+}
+
+// decodePNM decodes the binary PNM files pdfimages writes when it is not
+// asked for PNG: P6 for colour, P5 for grey and P4 for one bit a pixel, with
+// at most one byte a sample. A P6 decodes to an image.RGBA, or to an
+// image.Gray when its three channels are equal everywhere, because
+// pdfimages writes grey pictures as P6 too. P5 and P4 decode to an
+// image.Gray. Anything else, and an image over maxDecodePixels, is refused
+// before its pixels are allocated.
+func decodePNM(reader io.Reader) (image.Image, error) {
+	buffered := bufio.NewReader(reader)
+
+	header, err := readPNMHeader(buffered)
+	if err != nil {
+		return nil, err
+	}
+
+	if header.width*header.height > maxDecodePixels {
+		return nil, fmt.Errorf("%dx%d pixels is too large to decode", header.width, header.height)
+	}
+
+	switch header.magic {
+	case "P4":
+		return decodePBMRaster(buffered, header)
+	case "P5":
+		return decodePGMRaster(buffered, header)
+	default:
+		return decodePPMRaster(buffered, header)
+	}
+}
+
+// readPNMHeader reads the header of a binary PNM file up to and including
+// the single whitespace byte that separates it from the raster.
+func readPNMHeader(reader *bufio.Reader) (pnmHeader, error) {
+	magic := make([]byte, 2)
+	if _, err := io.ReadFull(reader, magic); err != nil {
+		return pnmHeader{}, fmt.Errorf("not a PNM file: %w", err)
+	}
+
+	header := pnmHeader{magic: string(magic), maxval: 1}
+	if header.magic != "P4" && header.magic != "P5" && header.magic != "P6" {
+		return pnmHeader{}, fmt.Errorf("not a binary PNM file (P4, P5 or P6): starts with %q", magic)
+	}
+
+	// A PBM has no maxval: every sample is one bit.
+	fields := []*int{&header.width, &header.height}
+	if header.magic != "P4" {
+		fields = append(fields, &header.maxval)
+	}
+
+	for _, field := range fields {
+		value, err := readPNMNumber(reader)
+		if err != nil {
+			return pnmHeader{}, err
+		}
+		*field = value
+	}
+
+	if header.maxval > 255 {
+		return pnmHeader{}, fmt.Errorf("PNM maxval %d takes two bytes a sample, only one is read", header.maxval)
+	}
+
+	separator, err := reader.ReadByte()
+	if err != nil || !isPNMSpace(separator) {
+		return pnmHeader{}, errors.New("PNM header does not end in whitespace")
+	}
+
+	return header, nil
+}
+
+// readPNMNumber skips the whitespace and comments before the next number of
+// a PNM header and reads it. No number in a header can be zero, so a zero
+// is refused like a missing one.
+func readPNMNumber(reader *bufio.Reader) (int, error) {
+	if err := skipPNMSpace(reader); err != nil {
+		return 0, err
+	}
+
+	value := 0
+	digits := 0
+
+	for {
+		next, err := reader.ReadByte()
+		if err != nil {
+			break
+		}
+
+		if next < '0' || next > '9' {
+			reader.UnreadByte()
+			break
+		}
+
+		value = value*10 + int(next-'0')
+		digits++
+
+		if value > maxPNMHeaderNumber {
+			return 0, fmt.Errorf("PNM header number is over %d", maxPNMHeaderNumber)
+		}
+	}
+
+	if digits == 0 || value == 0 {
+		return 0, errors.New("PNM header is missing a size or maxval")
+	}
+
+	return value, nil
+}
+
+// skipPNMSpace skips the whitespace and the comments, from "#" to the end
+// of the line, that may come before a number of a PNM header.
+func skipPNMSpace(reader *bufio.Reader) error {
+	inComment := false
+
+	for {
+		next, err := reader.ReadByte()
+		if err != nil {
+			return fmt.Errorf("PNM header is truncated: %w", err)
+		}
+
+		switch {
+		case inComment:
+			inComment = next != '\n' && next != '\r'
+		case next == '#':
+			inComment = true
+		case !isPNMSpace(next):
+			reader.UnreadByte()
+			return nil
+		}
+	}
+}
+
+// isPNMSpace reports whether b is one of the whitespace bytes the PNM
+// format allows between header fields.
+func isPNMSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\v' || b == '\f' || b == '\r'
+}
+
+// decodePBMRaster reads the raster of a P4 file. Each row is padded to a
+// whole byte, the leftmost pixel is the high bit, and a set bit is black.
+func decodePBMRaster(reader io.Reader, header pnmHeader) (image.Image, error) {
+	gray := image.NewGray(image.Rect(0, 0, header.width, header.height))
+	row := make([]byte, (header.width+7)/8)
+
+	for y := range header.height {
+		if _, err := io.ReadFull(reader, row); err != nil {
+			return nil, fmt.Errorf("PNM raster is truncated: %w", err)
+		}
+
+		// A new image.Gray is all black, so only the clear bits are set.
+		pixels := gray.Pix[y*gray.Stride : y*gray.Stride+header.width]
+		for x := range pixels {
+			if row[x/8]&(0x80>>(x%8)) == 0 {
+				pixels[x] = 255
+			}
+		}
+	}
+
+	return gray, nil
+}
+
+// decodePGMRaster reads the raster of a P5 file, one byte a pixel.
+func decodePGMRaster(reader io.Reader, header pnmHeader) (image.Image, error) {
+	gray := image.NewGray(image.Rect(0, 0, header.width, header.height))
+	if _, err := io.ReadFull(reader, gray.Pix); err != nil {
+		return nil, fmt.Errorf("PNM raster is truncated: %w", err)
+	}
+
+	if err := stretchSamples(gray.Pix, header.maxval); err != nil {
+		return nil, err
+	}
+
+	return gray, nil
+}
+
+// decodePPMRaster reads the raster of a P6 file, three bytes a pixel, into
+// an opaque image.RGBA, or into an image.Gray when every pixel is grey.
+func decodePPMRaster(reader io.Reader, header pnmHeader) (image.Image, error) {
+	pixelCount := header.width * header.height
+
+	samples := make([]byte, pixelCount*3)
+	if _, err := io.ReadFull(reader, samples); err != nil {
+		return nil, fmt.Errorf("PNM raster is truncated: %w", err)
+	}
+
+	if err := stretchSamples(samples, header.maxval); err != nil {
+		return nil, err
+	}
+
+	bounds := image.Rect(0, 0, header.width, header.height)
+
+	if isGreyRGB(samples) {
+		gray := image.NewGray(bounds)
+		for pixel := range pixelCount {
+			gray.Pix[pixel] = samples[pixel*3]
+		}
+		return gray, nil
+	}
+
+	rgba := image.NewRGBA(bounds)
+	for pixel := range pixelCount {
+		copy(rgba.Pix[pixel*4:pixel*4+3], samples[pixel*3:pixel*3+3])
+		rgba.Pix[pixel*4+3] = 255
+	}
+
+	return rgba, nil
+}
+
+// isGreyRGB reports whether every pixel of an RGB raster has its three
+// channels equal. It stops at the first colour pixel, so a colour picture
+// costs little more than its first row.
+func isGreyRGB(samples []byte) bool {
+	for offset := 0; offset+2 < len(samples); offset += 3 {
+		if samples[offset] != samples[offset+1] || samples[offset] != samples[offset+2] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// stretchSamples scales samples from 0..maxval to 0..255 in place, rounding
+// to the nearest value. A sample above maxval means a damaged file.
+func stretchSamples(samples []byte, maxval int) error {
+	if maxval == 255 {
+		return nil
+	}
+
+	for index, sample := range samples {
+		if int(sample) > maxval {
+			return fmt.Errorf("PNM sample %d is over maxval %d", sample, maxval)
+		}
+		samples[index] = uint8((int(sample)*255 + maxval/2) / maxval)
+	}
+
+	return nil
 }
 
 // OutlineEntry represents a heading/section in a document outline.

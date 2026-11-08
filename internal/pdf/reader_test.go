@@ -24,7 +24,7 @@ import (
 )
 
 // newTestReader creates a Reader pointing at a temp directory with test files.
-func newTestReader(t *testing.T) (*Reader, string) {
+func newTestReader(t testing.TB) (*Reader, string) {
 	t.Helper()
 	dir := t.TempDir()
 	r := NewReader(dir)
@@ -2779,7 +2779,7 @@ type imageFixture struct {
 // XObject fixture.draws times. The image carries a soft mask, which
 // pdfimages lists and extracts as a second "smask" image, so tests can check
 // that the mask is never returned as a picture.
-func writeImagePDF(t *testing.T, path string, fixture imageFixture) {
+func writeImagePDF(t testing.TB, path string, fixture imageFixture) {
 	t.Helper()
 
 	pixels := make([]byte, fixture.width*fixture.height*3)
@@ -2844,7 +2844,7 @@ func writeImagePDF(t *testing.T, path string, fixture imageFixture) {
 }
 
 // deflateBytes compresses data with zlib, the PDF FlateDecode filter.
-func deflateBytes(t *testing.T, data []byte) []byte {
+func deflateBytes(t testing.TB, data []byte) []byte {
 	t.Helper()
 
 	var compressed bytes.Buffer
@@ -3120,5 +3120,148 @@ func TestPandocFormatsNeedTheirReader(t *testing.T) {
 	}
 	if !installed[".docx"] || installed[".xlsx"] || installed[".pptx"] {
 		t.Fatalf("ListFormats: docx=%v xlsx=%v pptx=%v, want only docx installed", installed[".docx"], installed[".xlsx"], installed[".pptx"])
+	}
+}
+
+// BenchmarkExtractImages_NoisyPhoto extracts one 2048x2048 RGB image of
+// noise with a soft mask, the worst case for the PNG step: noise does not
+// compress, so every encoder spends its longest time on it. Run it with
+// -benchtime=1x when only the wall time of one call matters.
+func BenchmarkExtractImages_NoisyPhoto(b *testing.B) {
+	r, dir := newTestReader(b)
+	if _, err := exec.LookPath(r.pdfimagesBin); err != nil {
+		b.Skip("pdfimages (poppler) is not installed")
+	}
+
+	path := filepath.Join(dir, "photo.pdf")
+	writeImagePDF(b, path, imageFixture{width: 2048, height: 2048, draws: 1, noise: true})
+
+	for b.Loop() {
+		extraction, err := r.ExtractImages(b.Context(), "photo.pdf", 0, DefaultMaxImages)
+		if err != nil {
+			b.Fatalf("ExtractImages: %v", err)
+		}
+		if len(extraction.Images) != 1 {
+			b.Fatalf("returned %d images, want 1 (notes %q)", len(extraction.Images), extraction.Notes)
+		}
+	}
+}
+
+// pnmFile joins a hand-written PNM header and its raster into one file.
+func pnmFile(header string, raster ...byte) []byte {
+	return append([]byte(header), raster...)
+}
+
+func TestDecodePNM_ReadsColourGreyAndMonochrome(t *testing.T) {
+	// pdfimages never writes a comment, but the format allows one wherever
+	// whitespace goes in the header.
+	colour, err := decodePNM(bytes.NewReader(pnmFile("P6\n# written by hand\n2 1\n255\n", 255, 0, 0, 0, 0, 255)))
+	if err != nil {
+		t.Fatalf("P6: %v", err)
+	}
+	rgba, ok := colour.(*image.RGBA)
+	if !ok {
+		t.Fatalf("P6 must decode to *image.RGBA, got %T", colour)
+	}
+	if !slices.Equal(rgba.Pix, []uint8{255, 0, 0, 255, 0, 0, 255, 255}) {
+		t.Errorf("P6 pixels = %v, want red then blue, opaque", rgba.Pix)
+	}
+
+	// A maxval under 255 is stretched to the full byte range.
+	grey, err := decodePNM(bytes.NewReader(pnmFile("P5 3 1 15\n", 0, 15, 5)))
+	if err != nil {
+		t.Fatalf("P5: %v", err)
+	}
+	gray, ok := grey.(*image.Gray)
+	if !ok {
+		t.Fatalf("P5 must decode to *image.Gray, got %T", grey)
+	}
+	if !slices.Equal(gray.Pix, []uint8{0, 255, 85}) {
+		t.Errorf("P5 pixels = %v, want [0 255 85]", gray.Pix)
+	}
+
+	// Each PBM row is padded to a whole byte and a set bit is black: ten
+	// pixels take two bytes a row.
+	mono, err := decodePNM(bytes.NewReader(pnmFile("P4\n10 2\n", 0b10110000, 0b01000000, 0b11111111, 0b11000000)))
+	if err != nil {
+		t.Fatalf("P4: %v", err)
+	}
+	bits, ok := mono.(*image.Gray)
+	if !ok {
+		t.Fatalf("P4 must decode to *image.Gray, got %T", mono)
+	}
+	want := []uint8{
+		0, 255, 0, 0, 255, 255, 255, 255, 255, 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	}
+	if bits.Bounds().Dx() != 10 || bits.Bounds().Dy() != 2 || !slices.Equal(bits.Pix, want) {
+		t.Errorf("P4 = %v pixels %v, want 10x2 %v", bits.Bounds(), bits.Pix, want)
+	}
+}
+
+func TestDecodePNM_ReadsAGreyPPMAsGrey(t *testing.T) {
+	// pdfimages writes grey pictures as P6 too; keeping them grey keeps the
+	// PNG a third of the size, as it was when pdfimages wrote PNG.
+	decoded, err := decodePNM(bytes.NewReader(pnmFile("P6 2 1 255\n", 10, 10, 10, 200, 200, 200)))
+	if err != nil {
+		t.Fatalf("decodePNM: %v", err)
+	}
+
+	gray, ok := decoded.(*image.Gray)
+	if !ok {
+		t.Fatalf("a P6 with equal channels must decode to *image.Gray, got %T", decoded)
+	}
+	if !slices.Equal(gray.Pix, []uint8{10, 200}) {
+		t.Errorf("pixels = %v, want [10 200]", gray.Pix)
+	}
+}
+
+func TestDecodePNM_RejectsWhatItDoesNotRead(t *testing.T) {
+	cases := map[string][]byte{
+		"plain-text PPM":       pnmFile("P3\n1 1\n255\n0 0 0\n"),
+		"PAM":                  pnmFile("P7\nWIDTH 1\n"),
+		"not a PNM":            []byte("\x89PNG\r\n\x1a\n"),
+		"two bytes a sample":   pnmFile("P5 1 1 65535\n", 0, 0),
+		"zero width":           pnmFile("P5 0 1 255\n"),
+		"missing height":       pnmFile("P5 1"),
+		"short raster":         pnmFile("P6 2 2 255\n", 1, 2, 3),
+		"sample over maxval":   pnmFile("P5 1 1 15\n", 16),
+		"no space after value": pnmFile("P5 1 1 255x", 0),
+		"too large to decode":  pnmFile("P5 10000 10000 255\n"),
+	}
+
+	for name, data := range cases {
+		if decoded, err := decodePNM(bytes.NewReader(data)); err == nil {
+			t.Errorf("%s: decoded %v, want an error", name, decoded.Bounds())
+		}
+	}
+}
+
+func TestPreparePicture_ReadsAPBMAndKeepsAnIconAtItsSize(t *testing.T) {
+	prefix := filepath.Join(t.TempDir(), "img")
+
+	// pdfimages writes a one-bit picture as .pbm, not .ppm; at 10x2 it is
+	// also far under minImageSide and must still go out as it is.
+	raster := pnmFile("P4\n10 2\n", 0b10110000, 0b01000000, 0b11111111, 0b11000000)
+	if err := os.WriteFile(prefix+"-007.pbm", raster, 0o644); err != nil {
+		t.Fatalf("failed to write the PBM: %v", err)
+	}
+
+	info, err := preparePicture(prefix, listedImage{page: 2, number: 7, kind: "image", width: 10, height: 2})
+	if err != nil {
+		t.Fatalf("preparePicture: %v", err)
+	}
+
+	if info.Page != 2 || info.Index != 7 || info.Width != 10 || info.Height != 2 || info.OriginalWidth != 10 {
+		t.Errorf("info = page %d, image %d, %dx%d from %dx%d; want page 2, image 7, 10x2 unscaled", info.Page, info.Index, info.Width, info.Height, info.OriginalWidth, info.OriginalHeight)
+	}
+
+	gray, ok := decodeImage(t, info).(*image.Gray)
+	if !ok || gray.Pix[0] != 0 || gray.Pix[1] != 255 {
+		t.Errorf("the PNG must be grey with a black first pixel and a white second, got %T", decodeImage(t, info))
+	}
+
+	if _, err := preparePicture(prefix, listedImage{page: 2, number: 8, kind: "image"}); err == nil || !strings.Contains(err.Error(), "did not write it") {
+		t.Errorf("a picture pdfimages did not write must say so, got %v", err)
 	}
 }

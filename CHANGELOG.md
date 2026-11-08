@@ -49,6 +49,10 @@ parameters are optional and the structured results keep their text form.
 
 ### Changed
 
+- `extract_images` asks `pdfimages` for PNM instead of PNG and does the
+  decoding, scaling and PNG encoding in Go: poppler's own PNG writer was
+  most of the time of a call (about 2.3 s against 0.5 s on a 2048 x 2048
+  photo).
 - `extract_images` returns real images: PNG image content per picture,
   alpha and stencil masks skipped, scaled to 1600 px on the longer side,
   8 MB per answer. It used to return raw PPM as base64 inside a JSON text
