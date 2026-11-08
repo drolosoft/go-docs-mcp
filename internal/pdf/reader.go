@@ -420,11 +420,22 @@ func (r *Reader) ListDocuments(ctx context.Context) ([]DocumentInfo, error) {
 	return docs, nil
 }
 
-// getPageCount uses pdfinfo to get the page count for a PDF file.
+// getPageCount uses pdfinfo to get the page count for a PDF file, or 0 when
+// pdfinfo cannot tell.
 func (r *Reader) getPageCount(ctx context.Context, path string) int {
-	out, err := runTool(ctx, toolTimeout, nil, path, r.pdfinfoBin, path)
+	pages, err := r.pageCount(ctx, path)
 	if err != nil {
 		return 0
+	}
+	return pages
+}
+
+// pageCount asks pdfinfo how many pages a PDF has and says why when it
+// cannot, so a page range is never checked against a guess.
+func (r *Reader) pageCount(ctx context.Context, path string) (int, error) {
+	out, err := runTool(ctx, toolTimeout, nil, path, r.pdfinfoBin, path)
+	if err != nil {
+		return 0, err
 	}
 
 	for _, line := range strings.Split(out, "\n") {
@@ -433,12 +444,12 @@ func (r *Reader) getPageCount(ctx context.Context, path string) int {
 			if len(parts) >= 2 {
 				n, err := strconv.Atoi(parts[1])
 				if err == nil {
-					return n
+					return n, nil
 				}
 			}
 		}
 	}
-	return 0
+	return 0, fmt.Errorf("pdfinfo reported no page count for %s", filepath.Base(path))
 }
 
 // ReadDocument extracts text from a PDF file. If page > 0, only that page is returned.
@@ -458,12 +469,7 @@ func (r *Reader) ReadDocument(ctx context.Context, filename string, page int) (s
 		if !isPDF(safe) {
 			return "", fmt.Errorf("page selection is only supported for PDF files; %s is %s — call without page/pages to read the whole document", safe, filepath.Ext(safe))
 		}
-		text, method, err := r.readWithOCRFallback(ctx, path, page, page)
-		if err != nil {
-			return "", err
-		}
-		_ = method // method info available for logging if needed
-		return text, nil
+		return r.readPageRanges(ctx, path, [][2]int{{page, page}})
 	}
 
 	return r.extractFull(ctx, safe, path)
@@ -546,10 +552,68 @@ func parsePageRanges(pagesStr string) ([][2]int, error) {
 	return ranges, nil
 }
 
+// maxPagesPerCall caps the pages one read may cover. A scanned page costs two
+// processes and up to ocrPageTimeout, so a request for a thousand pages
+// would run for hours; two hundred is a long chapter, and a client that
+// wants more can ask in several calls.
+const maxPagesPerCall = 200
+
+// errTooManyPages marks a request over maxPagesPerCall, so the OCR fallback
+// can report it instead of quietly returning the empty pdftotext text.
+var errTooManyPages = errors.New("too many pages for one call")
+
+// clampPageRanges fits the requested ranges to the pages the document really
+// has: a range that runs past the end stops at the last page and one that
+// starts after it is an error. The pages left are capped at maxPagesPerCall.
+// Without this, "1-60" on a one-page PDF looked like sixty empty pages and
+// started sixty OCR runs.
+func clampPageRanges(ranges [][2]int, pageCount int) ([][2]int, error) {
+	var clamped [][2]int
+	total := 0
+
+	for _, pageRange := range ranges {
+		first := pageRange[0]
+		last := pageRange[1]
+		if first > pageCount {
+			return nil, fmt.Errorf("page %d does not exist: the document has %d page(s)", first, pageCount)
+		}
+		if last > pageCount {
+			last = pageCount
+		}
+
+		total += last - first + 1
+		clamped = append(clamped, [2]int{first, last})
+	}
+
+	if total > maxPagesPerCall {
+		return nil, fmt.Errorf("%w: a call can read at most %d pages and this one asks for %d, split it into several calls", errTooManyPages, maxPagesPerCall, total)
+	}
+
+	return clamped, nil
+}
+
 // extractPageRanges extracts text from multiple page ranges and combines the results.
 // Falls back to OCR if pdftotext returns empty text.
 func (r *Reader) extractPageRanges(ctx context.Context, path, pagesStr string) (string, error) {
 	ranges, err := parsePageRanges(pagesStr)
+	if err != nil {
+		return "", err
+	}
+
+	return r.readPageRanges(ctx, path, ranges)
+}
+
+// readPageRanges checks parsed ranges against the page count pdfinfo gives,
+// then extracts each one with the OCR fallback. The real count, not the
+// request, decides how many pages are read and how much text a range needs
+// before it counts as scanned.
+func (r *Reader) readPageRanges(ctx context.Context, path string, ranges [][2]int) (string, error) {
+	pageCount, err := r.pageCount(ctx, path)
+	if err != nil {
+		return "", err
+	}
+
+	ranges, err = clampPageRanges(ranges, pageCount)
 	if err != nil {
 		return "", err
 	}
@@ -716,6 +780,11 @@ func (r *Reader) ocrDocument(ctx context.Context, path string, page int, languag
 // deadline or a cancellation stops the loop, because every later page would
 // fail the same way. A single page returns its error as it is.
 func (r *Reader) ocrPages(ctx context.Context, path string, firstPage, lastPage int, language string) (string, error) {
+	pages := lastPage - firstPage + 1
+	if pages > maxPagesPerCall {
+		return "", fmt.Errorf("%w: OCR covers at most %d pages per call and this document has %d, ask for a range with pages", errTooManyPages, maxPagesPerCall, pages)
+	}
+
 	ocrCtx, cancel := context.WithTimeout(ctx, ocrCallTimeout)
 	defer cancel()
 
@@ -766,18 +835,18 @@ func (r *Reader) readWithOCRFallback(ctx context.Context, path string, firstPage
 		return "", "", err
 	}
 
-	// Determine page count for threshold calculation
-	pageCount := 1
-	if firstPage > 0 && lastPage > 0 {
-		pageCount = lastPage - firstPage + 1
-	} else if firstPage == 0 && lastPage == 0 {
-		pageCount = r.getPageCount(ctx, path)
-		if pageCount == 0 {
-			pageCount = 1
+	// A whole-document read asks pdfinfo once, and that count sets both the
+	// threshold and the pages to recognise. Ranges arrive already clamped to
+	// the real page count by readPageRanges.
+	if firstPage == 0 {
+		firstPage = 1
+		lastPage = r.getPageCount(ctx, path)
+		if lastPage == 0 {
+			lastPage = 1
 		}
 	}
 
-	if !isTextEmpty(text, pageCount) {
+	if !isTextEmpty(text, lastPage-firstPage+1) {
 		return text, "pdftotext", nil
 	}
 
@@ -786,19 +855,11 @@ func (r *Reader) readWithOCRFallback(ctx context.Context, path string, firstPage
 		return text, "pdftotext (empty, no OCR available)", nil
 	}
 
-	// A page or a range is recognised as asked; a whole-document read
-	// covers every page pdfinfo reports.
-	var ocrText string
-	var ocrErr error
-	if firstPage > 0 {
-		ocrText, ocrErr = r.ocrPages(ctx, path, firstPage, lastPage, "eng")
-	} else {
-		ocrText, ocrErr = r.ocrDocument(ctx, path, 0, "eng")
-	}
+	ocrText, ocrErr := r.ocrPages(ctx, path, firstPage, lastPage, "eng")
 
-	// A deadline or a cancellation is the caller's answer, not a reason to
-	// fall back to the empty pdftotext text.
-	if isContextError(ocrErr) {
+	// A deadline, a cancellation or a scan too long for one call is the
+	// caller's answer, not a reason to fall back to the empty pdftotext text.
+	if isContextError(ocrErr) || errors.Is(ocrErr, errTooManyPages) {
 		return "", "", ocrErr
 	}
 	if ocrErr != nil {

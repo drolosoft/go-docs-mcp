@@ -1450,3 +1450,242 @@ func TestReadDocument_ToolStderrIsBoundedAndNamesNoPath(t *testing.T) {
 		t.Errorf("error is %d bytes long, want the stderr cut to %d", len(message), stderrLimit)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 23. Page ranges against the real page count
+// ---------------------------------------------------------------------------
+
+// writeTextPDF writes a minimal PDF with one page per entry of pageTexts,
+// each drawn in Helvetica, so tests have real text PDFs without binary
+// fixtures in the repository.
+func writeTextPDF(t *testing.T, path string, pageTexts []string) {
+	t.Helper()
+
+	// Objects 1 and 2 are the catalog and the page tree, 3 is the font, and
+	// every page takes two more: the page and its content stream.
+	var objects []string
+	var kids []string
+	for index := range pageTexts {
+		kids = append(kids, fmt.Sprintf("%d 0 R", 4+index*2))
+	}
+	objects = append(objects, "<< /Type /Catalog /Pages 2 0 R >>")
+	objects = append(objects, fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), len(pageTexts)))
+	objects = append(objects, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+	for index, text := range pageTexts {
+		stream := fmt.Sprintf("BT /F1 12 Tf 72 720 Td (%s) Tj ET", text)
+		objects = append(objects, fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", 5+index*2))
+		objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(stream), stream))
+	}
+
+	// The cross-reference table needs the byte offset of every object.
+	var document strings.Builder
+	document.WriteString("%PDF-1.4\n")
+	var offsets []int
+	for index, object := range objects {
+		offsets = append(offsets, document.Len())
+		fmt.Fprintf(&document, "%d 0 obj\n%s\nendobj\n", index+1, object)
+	}
+
+	xrefOffset := document.Len()
+	fmt.Fprintf(&document, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for _, offset := range offsets {
+		fmt.Fprintf(&document, "%010d 00000 n \n", offset)
+	}
+	fmt.Fprintf(&document, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xrefOffset)
+
+	if err := os.WriteFile(path, []byte(document.String()), 0o644); err != nil {
+		t.Fatalf("failed to write %s: %v", path, err)
+	}
+}
+
+// longPageText has more than the 50 visible characters isTextEmpty asks of
+// a page, so pdftotext's output counts as real text.
+const longPageText = "This page of the test document carries enough real text to never look scanned."
+
+// invocationLog records which fake binaries ran, one line per run.
+type invocationLog struct {
+	path string
+}
+
+// newInvocationLog creates an empty log file in a temporary directory.
+func newInvocationLog(t *testing.T) *invocationLog {
+	t.Helper()
+	return &invocationLog{path: filepath.Join(t.TempDir(), "invocations.log")}
+}
+
+// record returns the shell line that appends name and its arguments.
+func (log *invocationLog) record(name string) string {
+	return fmt.Sprintf("echo \"%s $*\" >> '%s'\n", name, log.path)
+}
+
+// count returns how many times the binary called name ran.
+func (log *invocationLog) count(t *testing.T, name string) int {
+	t.Helper()
+	data, err := os.ReadFile(log.path)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("failed to read invocation log: %v", err)
+	}
+
+	runs := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, name+" ") {
+			runs++
+		}
+	}
+	return runs
+}
+
+// useFakeOCR points the reader at a pdftoppm that writes an empty TIFF and a
+// tesseract that prints recognisedText, both logged, and turns OCR on.
+func useFakeOCR(t *testing.T, r *Reader, log *invocationLog, recognisedText string) {
+	t.Helper()
+	bin := t.TempDir()
+
+	// pdftoppm's last argument is the output prefix; -singlefile adds .tif.
+	r.pdftoppmBin = writeFakeBinary(t, bin, "pdftoppm",
+		log.record("pdftoppm")+"for arg; do prefix=$arg; done\n: > \"$prefix.tif\"\n")
+	r.tesseractBin = writeFakeBinary(t, bin, "tesseract",
+		log.record("tesseract")+"cat > /dev/null\necho '"+recognisedText+"'\n")
+	r.hasOCR = true
+}
+
+func TestReadDocumentPages_RangePastTheEndOfATextPDFRunsNoOCR(t *testing.T) {
+	r, dir := newTestReader(t)
+	realPdftotext, err := exec.LookPath(r.pdftotextBin)
+	if err != nil {
+		t.Skip("poppler not installed")
+	}
+	if _, err := exec.LookPath(r.pdfinfoBin); err != nil {
+		t.Skip("poppler not installed")
+	}
+
+	writeTextPDF(t, filepath.Join(dir, "one.pdf"), []string{longPageText})
+	log := newInvocationLog(t)
+	useFakeOCR(t, r, log, "should never be used")
+	r.pdftotextBin = writeFakeBinary(t, t.TempDir(), "pdftotext",
+		log.record("pdftotext")+"exec '"+realPdftotext+"' \"$@\"\n")
+
+	got, err := r.ReadDocumentPages(t.Context(), "one.pdf", "1-60")
+	if err != nil {
+		t.Fatalf("ReadDocumentPages(1-60) on a one-page PDF: %v", err)
+	}
+
+	if !strings.Contains(got, "enough real text") {
+		t.Errorf("want the page text, got %q", got)
+	}
+	if runs := log.count(t, "pdftoppm"); runs != 0 {
+		t.Errorf("pdftoppm ran %d times on a text PDF, want 0", runs)
+	}
+	if runs := log.count(t, "pdftotext"); runs != 1 {
+		t.Errorf("pdftotext ran %d times, want 1", runs)
+	}
+}
+
+func TestReadDocumentPages_ScannedPDFOnlyOCRsPagesThatExist(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "scan.pdf", "%PDF-1.4 never parsed by the fakes")
+
+	log := newInvocationLog(t)
+	useFakeOCR(t, r, log, "recognised by the fake tesseract")
+	bin := t.TempDir()
+	r.pdfinfoBin = writeFakeBinary(t, bin, "pdfinfo", log.record("pdfinfo")+"echo 'Pages:          1'\n")
+	r.pdftotextBin = writeFakeBinary(t, bin, "pdftotext", log.record("pdftotext"))
+
+	got, err := r.ReadDocumentPages(t.Context(), "scan.pdf", "1-60")
+	if err != nil {
+		t.Fatalf("ReadDocumentPages(1-60) on a one-page scan: %v", err)
+	}
+
+	if !strings.Contains(got, "recognised by the fake tesseract") {
+		t.Errorf("want the OCR text, got %q", got)
+	}
+	if runs := log.count(t, "pdftoppm"); runs != 1 {
+		t.Errorf("pdftoppm ran %d times for a one-page document, want 1", runs)
+	}
+	if runs := log.count(t, "tesseract"); runs != 1 {
+		t.Errorf("tesseract ran %d times for a one-page document, want 1", runs)
+	}
+	if runs := log.count(t, "pdfinfo"); runs != 1 {
+		t.Errorf("pdfinfo ran %d times, want 1", runs)
+	}
+}
+
+func TestReadDocumentPages_RejectsPagesPastTheEnd(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "scan.pdf", "%PDF-1.4 never parsed by the fakes")
+
+	log := newInvocationLog(t)
+	bin := t.TempDir()
+	r.pdfinfoBin = writeFakeBinary(t, bin, "pdfinfo", "echo 'Pages:          1'\n")
+	r.pdftotextBin = writeFakeBinary(t, bin, "pdftotext", log.record("pdftotext"))
+
+	_, err := r.ReadDocumentPages(t.Context(), "scan.pdf", "5-9")
+	if err == nil || !strings.Contains(err.Error(), "has 1 page") {
+		t.Errorf("ReadDocumentPages(5-9) on a one-page PDF: want an error naming the page count, got %v", err)
+	}
+
+	_, err = r.ReadDocument(t.Context(), "scan.pdf", 3)
+	if err == nil || !strings.Contains(err.Error(), "has 1 page") {
+		t.Errorf("ReadDocument(page 3) on a one-page PDF: want an error naming the page count, got %v", err)
+	}
+
+	if runs := log.count(t, "pdftotext"); runs != 0 {
+		t.Errorf("pdftotext ran %d times for pages that do not exist, want 0", runs)
+	}
+}
+
+func TestReadDocumentPages_CapsPagesPerCall(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "long.pdf", "%PDF-1.4 never parsed by the fakes")
+
+	log := newInvocationLog(t)
+	bin := t.TempDir()
+	r.pdfinfoBin = writeFakeBinary(t, bin, "pdfinfo", "echo 'Pages:          500'\n")
+	r.pdftotextBin = writeFakeBinary(t, bin, "pdftotext", log.record("pdftotext"))
+
+	_, err := r.ReadDocumentPages(t.Context(), "long.pdf", "1-150,300-360")
+	if err == nil || !strings.Contains(err.Error(), "at most 200 pages") {
+		t.Errorf("211 pages in one call: want an 'at most 200 pages' error, got %v", err)
+	}
+	if runs := log.count(t, "pdftotext"); runs != 0 {
+		t.Errorf("pdftotext ran %d times for a refused request, want 0", runs)
+	}
+}
+
+func TestClampPageRanges(t *testing.T) {
+	tests := []struct {
+		name      string
+		ranges    [][2]int
+		pageCount int
+		want      [][2]int
+		wantErr   string
+	}{
+		{"inside", [][2]int{{1, 3}}, 10, [][2]int{{1, 3}}, ""},
+		{"cut at the last page", [][2]int{{1, 60}}, 1, [][2]int{{1, 1}}, ""},
+		{"several ranges", [][2]int{{2, 4}, {8, 20}}, 10, [][2]int{{2, 4}, {8, 10}}, ""},
+		{"starts past the end", [][2]int{{1, 1}, {12, 14}}, 10, nil, "has 10 page"},
+		{"exactly the cap", [][2]int{{1, 200}}, 500, [][2]int{{1, 200}}, ""},
+		{"over the cap", [][2]int{{1, 201}}, 500, nil, "at most 200 pages"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := clampPageRanges(tc.ranges, tc.pageCount)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("clampPageRanges: want an error with %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("clampPageRanges: %v", err)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Errorf("clampPageRanges = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
