@@ -322,7 +322,7 @@ func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("read_document",
-		mcp.WithDescription("Read text content from a document with optional page selection. Use this when you need the raw text of a PDF, TXT, MD, CSV, or DOCX file; TXT/MD/CSV are returned verbatim, DOCX via pandoc; PDFs support page ranges (e.g. \"1-5\", \"1-3,7,10-12\") and auto-OCR fallback for scanned pages. Long texts come in pages of max_chars characters; a truncated result ends with the offset to ask for next. Read-only."),
+		mcp.WithDescription("Read text content from a document with optional page selection. Use this when you need the raw text of a PDF, TXT, MD, CSV, DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF or IPYNB file; TXT/MD/CSV are returned verbatim, the Office, EPUB, HTML, RTF and notebook formats via pandoc; PDFs support page ranges (e.g. \"1-5\", \"1-3,7,10-12\") and auto-OCR fallback for scanned pages. Long texts come in pages of max_chars characters; a truncated result ends with the offset to ask for next. Read-only."),
 		mcp.WithTitleAnnotation("Read Document"),
 		readOnlyHints(false),
 		mcp.WithString("filename",
@@ -962,7 +962,7 @@ func registerListFormats(s *server.MCPServer, reader *pdf.Reader) {
 
 func registerReadImage(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("read_image",
-		mcp.WithDescription("Extract text from a standalone image file (PNG, JPG, TIFF, BMP) using OCR. Use this when you need to read text from an image rather than a document; supports multiple languages via tesseract. Read-only."),
+		mcp.WithDescription("Extract text from a standalone image file (PNG, JPG, WebP, TIFF, BMP) using OCR. Use this when you need to read text from an image rather than a document; supports multiple languages via tesseract. Read-only."),
 		mcp.WithTitleAnnotation("Read Image"),
 		readOnlyHints(false),
 		mcp.WithString("filename",
