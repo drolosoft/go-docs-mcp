@@ -46,7 +46,9 @@ changed its parameters; clients that worked with v1.2.0 keep working.
   tesseract, so DOCX works from clients that start with a minimal `PATH`.
 - Dependencies: `github.com/mark3labs/mcp-go` v1.5.0, `golang.org/x/text`
   current release, Go 1.27.3. `govulncheck` reports no reachable
-  vulnerability. GOVULNCHECK_MCP_GO_LINE
+  vulnerability. GO-2026-6911 (mcp-go, SSRF through an
+  unvalidated Location header, no fix released) is in a required module but
+  not called by go-docs-mcp, which uses only the stdio transport.
 - README, CLAUDE.md and doc/WHY-MCP corrected: 13 tools everywhere, Go 1.27.3,
   Claude Code configuration through `claude mcp add` or `.mcp.json`, the
   outline described as deduced from the text, and an honest Security section.
