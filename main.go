@@ -103,7 +103,7 @@ func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		docs, err := reader.ListDocuments()
+		docs, err := reader.ListDocuments(ctx)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error listing documents: %v", err)), nil
 		}
@@ -141,7 +141,7 @@ func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 		// Check for pages range first (takes priority over single page)
 		pagesStr := request.GetString("pages", "")
 		if pagesStr != "" {
-			text, err := reader.ReadDocumentPages(filename, pagesStr)
+			text, err := reader.ReadDocumentPages(ctx, filename, pagesStr)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Error reading document pages: %v", err)), nil
 			}
@@ -149,7 +149,7 @@ func registerReadDocument(s *server.MCPServer, reader *pdf.Reader) {
 		}
 
 		page := request.GetInt("page", 0)
-		text, err := reader.ReadDocument(filename, page)
+		text, err := reader.ReadDocument(ctx, filename, page)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error reading document: %v", err)), nil
 		}
@@ -182,7 +182,7 @@ func registerSearchDocument(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError("query parameter is required"), nil
 		}
 
-		result, err := reader.SearchDocument(filename, query)
+		result, err := reader.SearchDocument(ctx, filename, query)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error searching document: %v", err)), nil
 		}
@@ -206,7 +206,7 @@ func registerGetDocumentSummary(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError("filename parameter is required"), nil
 		}
 
-		text, err := reader.GetDocumentSummary(filename)
+		text, err := reader.GetDocumentSummary(ctx, filename)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error getting summary: %v", err)), nil
 		}
@@ -230,7 +230,7 @@ func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError("filename parameter is required"), nil
 		}
 
-		metadata, err := reader.GetDocumentMetadata(filename)
+		metadata, err := reader.GetDocumentMetadata(ctx, filename)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error getting metadata: %v", err)), nil
 		}
@@ -264,7 +264,7 @@ func registerExtractImages(s *server.MCPServer, reader *pdf.Reader) {
 
 		page := request.GetInt("page", 0)
 
-		images, err := reader.ExtractImages(filename, page)
+		images, err := reader.ExtractImages(ctx, filename, page)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error extracting images: %v", err)), nil
 		}
@@ -335,7 +335,7 @@ func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 		page := request.GetInt("page", 0)
 		language := request.GetString("language", "eng")
 
-		text, err := reader.OCRDocument(filename, page, language)
+		text, err := reader.OCRDocument(ctx, filename, page, language)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("OCR error: %v", err)), nil
 		}
@@ -390,9 +390,9 @@ func downloadAndReadPDF(reader *pdf.Reader, url, pagesStr string) (string, error
 
 	// Extract text from the downloaded PDF
 	if pagesStr != "" {
-		return reader.ReadFilePages(tmpFile.Name(), pagesStr)
+		return reader.ReadFilePages(context.TODO(), tmpFile.Name(), pagesStr)
 	}
-	return reader.ReadFile(tmpFile.Name())
+	return reader.ReadFile(context.TODO(), tmpFile.Name())
 }
 
 func registerListFormats(s *server.MCPServer, reader *pdf.Reader) {
@@ -436,7 +436,7 @@ func registerReadImage(s *server.MCPServer, reader *pdf.Reader) {
 
 		language := request.GetString("language", "eng")
 
-		text, err := reader.ReadImage(filename, language)
+		text, err := reader.ReadImage(ctx, filename, language)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error reading image: %v", err)), nil
 		}
@@ -464,7 +464,7 @@ func registerGetDocumentOutline(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError("filename parameter is required"), nil
 		}
 
-		outline, err := reader.GetDocumentOutline(filename)
+		outline, err := reader.GetDocumentOutline(ctx, filename)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error extracting outline: %v", err)), nil
 		}
@@ -502,7 +502,7 @@ func registerExtractTables(s *server.MCPServer, reader *pdf.Reader) {
 
 		page := request.GetInt("page", 0)
 
-		tables, err := reader.ExtractTables(filename, page)
+		tables, err := reader.ExtractTables(ctx, filename, page)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error extracting tables: %v", err)), nil
 		}
@@ -535,7 +535,7 @@ func registerConvertToMarkdown(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError("filename parameter is required"), nil
 		}
 
-		markdown, err := reader.ConvertToMarkdown(filename)
+		markdown, err := reader.ConvertToMarkdown(ctx, filename)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error converting to markdown: %v", err)), nil
 		}

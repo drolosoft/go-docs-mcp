@@ -1,6 +1,8 @@
 package pdf
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -126,7 +128,7 @@ func TestListDocuments_WithFiles(t *testing.T) {
 	writeFile(t, dir, "data.csv", "a,b,c\n1,2,3")
 	writeFile(t, dir, "readme.pdf", "fake pdf content") // not a real PDF but will be listed
 
-	docs, err := r.ListDocuments()
+	docs, err := r.ListDocuments(t.Context())
 	if err != nil {
 		t.Fatalf("ListDocuments() error: %v", err)
 	}
@@ -166,7 +168,7 @@ func TestListDocuments_ExcludesUnsupported(t *testing.T) {
 	writeFile(t, dir, "script.sh", "#!/bin/bash")
 	writeFile(t, dir, "archive.zip", "pk")
 
-	docs, err := r.ListDocuments()
+	docs, err := r.ListDocuments(t.Context())
 	if err != nil {
 		t.Fatalf("ListDocuments() error: %v", err)
 	}
@@ -182,7 +184,7 @@ func TestListDocuments_ExcludesUnsupported(t *testing.T) {
 func TestListDocuments_EmptyDirectory(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	docs, err := r.ListDocuments()
+	docs, err := r.ListDocuments(t.Context())
 	if err != nil {
 		t.Fatalf("ListDocuments() error: %v", err)
 	}
@@ -202,7 +204,7 @@ func TestListDocuments_SkipsSubdirectories(t *testing.T) {
 	}
 	writeFile(t, subdir, "nested.txt", "should not appear")
 
-	docs, err := r.ListDocuments()
+	docs, err := r.ListDocuments(t.Context())
 	if err != nil {
 		t.Fatalf("ListDocuments() error: %v", err)
 	}
@@ -227,7 +229,7 @@ func TestReadDocument_TextFormats_ReturnContentVerbatim(t *testing.T) {
 	}
 	for name, content := range cases {
 		writeFile(t, dir, name, content)
-		got, err := r.ReadDocument(name, 0)
+		got, err := r.ReadDocument(t.Context(), name, 0)
 		if err != nil {
 			t.Fatalf("ReadDocument(%s): unexpected error: %v", name, err)
 		}
@@ -240,7 +242,7 @@ func TestReadDocument_TextFormats_ReturnContentVerbatim(t *testing.T) {
 func TestReadDocument_TextFormats_ServeCache(t *testing.T) {
 	r, dir := newTestReader(t)
 	writeFile(t, dir, "notes.md", "v1")
-	if got, _ := r.ReadDocument("notes.md", 0); got != "v1" {
+	if got, _ := r.ReadDocument(t.Context(), "notes.md", 0); got != "v1" {
 		t.Fatalf("first read = %q", got)
 	}
 	// Same mtime -> cached; a rewrite with a newer mtime must be picked up.
@@ -248,7 +250,7 @@ func TestReadDocument_TextFormats_ServeCache(t *testing.T) {
 	writeFile(t, dir, "notes.md", "v2")
 	future := time.Now().Add(2 * time.Second)
 	_ = os.Chtimes(filepath.Join(dir, "notes.md"), future, future)
-	if got, _ := r.ReadDocument("notes.md", 0); got != "v2" {
+	if got, _ := r.ReadDocument(t.Context(), "notes.md", 0); got != "v2" {
 		t.Errorf("after rewrite = %q, want v2 (cache must key on mtime)", got)
 	}
 }
@@ -258,10 +260,10 @@ func TestReadDocument_TextFormats_RejectPageSelection(t *testing.T) {
 	// error, not a pdftotext failure and not silently the whole file.
 	r, dir := newTestReader(t)
 	writeFile(t, dir, "notes.md", "# Title")
-	if _, err := r.ReadDocument("notes.md", 2); err == nil || !strings.Contains(err.Error(), "PDF") {
+	if _, err := r.ReadDocument(t.Context(), "notes.md", 2); err == nil || !strings.Contains(err.Error(), "PDF") {
 		t.Errorf("ReadDocument(page=2) on .md: want a 'only supported for PDF' error, got %v", err)
 	}
-	if _, err := r.ReadDocumentPages("notes.md", "1-2"); err == nil || !strings.Contains(err.Error(), "PDF") {
+	if _, err := r.ReadDocumentPages(t.Context(), "notes.md", "1-2"); err == nil || !strings.Contains(err.Error(), "PDF") {
 		t.Errorf("ReadDocumentPages on .md: want a 'only supported for PDF' error, got %v", err)
 	}
 }
@@ -269,7 +271,7 @@ func TestReadDocument_TextFormats_RejectPageSelection(t *testing.T) {
 func TestSearchDocument_TextFile_FindsMatches(t *testing.T) {
 	r, dir := newTestReader(t)
 	writeFile(t, dir, "log.txt", "alpha\nbeta needle here\ngamma")
-	out, err := r.SearchDocument("log.txt", "needle")
+	out, err := r.SearchDocument(t.Context(), "log.txt", "needle")
 	if err != nil {
 		t.Fatalf("SearchDocument(.txt): %v", err)
 	}
@@ -285,7 +287,7 @@ func TestGetDocumentSummary_TextFile_ReturnsHead(t *testing.T) {
 		fmt.Fprintf(&b, "line %d\n", i)
 	}
 	writeFile(t, dir, "big.md", b.String())
-	out, err := r.GetDocumentSummary("big.md")
+	out, err := r.GetDocumentSummary(t.Context(), "big.md")
 	if err != nil {
 		t.Fatalf("GetDocumentSummary(.md): %v", err)
 	}
@@ -300,7 +302,7 @@ func TestReadDocument_Docx_RequiresPandoc(t *testing.T) {
 	}
 	r, dir := newTestReader(t)
 	writeFile(t, dir, "doc.docx", "not really a docx")
-	_, err := r.ReadDocument("doc.docx", 0)
+	_, err := r.ReadDocument(t.Context(), "doc.docx", 0)
 	if err == nil || !strings.Contains(err.Error(), "pandoc") {
 		t.Errorf("ReadDocument(.docx) without pandoc: want an error naming pandoc, got %v", err)
 	}
@@ -317,7 +319,7 @@ func TestReadDocument_Docx_ViaPandoc(t *testing.T) {
 	if out, err := exec.Command("pandoc", src, "-o", filepath.Join(dir, "doc.docx")).CombinedOutput(); err != nil {
 		t.Skipf("pandoc could not build fixture: %v %s", err, out)
 	}
-	got, err := r.ReadDocument("doc.docx", 0)
+	got, err := r.ReadDocument(t.Context(), "doc.docx", 0)
 	if err != nil {
 		t.Fatalf("ReadDocument(.docx): %v", err)
 	}
@@ -332,7 +334,7 @@ func TestReadDocument_SanitizesFilenameFirst(t *testing.T) {
 	// Verify that sanitization happens BEFORE file-not-found check
 	writeFile(t, dir, "legit.txt", "content")
 
-	_, err := r.ReadDocument("../escape.txt", 0)
+	_, err := r.ReadDocument(t.Context(), "../escape.txt", 0)
 	if err == nil {
 		t.Error("ReadDocument() should reject directory traversal")
 	}
@@ -344,7 +346,7 @@ func TestReadDocument_SanitizesFilenameFirst(t *testing.T) {
 func TestReadDocument_NotFound(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.ReadDocument("nonexistent.txt", 0)
+	_, err := r.ReadDocument(t.Context(), "nonexistent.txt", 0)
 	if err == nil {
 		t.Error("ReadDocument() for nonexistent file: expected error, got nil")
 	}
@@ -356,7 +358,7 @@ func TestReadDocument_NotFound(t *testing.T) {
 func TestReadDocument_InvalidFilename(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.ReadDocument("../escape.txt", 0)
+	_, err := r.ReadDocument(t.Context(), "../escape.txt", 0)
 	if err == nil {
 		t.Error("ReadDocument() with traversal: expected error, got nil")
 	}
@@ -368,7 +370,7 @@ func TestReadDocument_InvalidFilename(t *testing.T) {
 func TestReadDocument_UnsupportedExtension(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.ReadDocument("malware.exe", 0)
+	_, err := r.ReadDocument(t.Context(), "malware.exe", 0)
 	if err == nil {
 		t.Error("ReadDocument() with .exe: expected error, got nil")
 	}
@@ -387,7 +389,7 @@ func TestReadDocument_UnsupportedExtension(t *testing.T) {
 func TestSearchDocument_InvalidFilename(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.SearchDocument("../etc/passwd", "root")
+	_, err := r.SearchDocument(t.Context(), "../etc/passwd", "root")
 	if err == nil {
 		t.Error("SearchDocument() with traversal: expected error, got nil")
 	}
@@ -396,7 +398,7 @@ func TestSearchDocument_InvalidFilename(t *testing.T) {
 func TestSearchDocument_NotFound(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.SearchDocument("missing.txt", "hello")
+	_, err := r.SearchDocument(t.Context(), "missing.txt", "hello")
 	if err == nil {
 		t.Error("SearchDocument() for missing file: expected error, got nil")
 	}
@@ -412,7 +414,7 @@ func TestSearchDocument_NotFound(t *testing.T) {
 func TestGetDocumentSummary_InvalidFilename(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.GetDocumentSummary("../bad.txt")
+	_, err := r.GetDocumentSummary(t.Context(), "../bad.txt")
 	if err == nil {
 		t.Error("GetDocumentSummary() with traversal: expected error, got nil")
 	}
@@ -421,7 +423,7 @@ func TestGetDocumentSummary_InvalidFilename(t *testing.T) {
 func TestGetDocumentSummary_NotFound(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.GetDocumentSummary("missing.txt")
+	_, err := r.GetDocumentSummary(t.Context(), "missing.txt")
 	if err == nil {
 		t.Error("GetDocumentSummary() for missing file: expected error, got nil")
 	}
@@ -437,7 +439,7 @@ func TestConvertToMarkdown_MdPassthrough(t *testing.T) {
 	content := "# Hello\n\nThis is **bold** markdown."
 	writeFile(t, dir, "readme.md", content)
 
-	got, err := r.ConvertToMarkdown("readme.md")
+	got, err := r.ConvertToMarkdown(t.Context(), "readme.md")
 	if err != nil {
 		t.Fatalf("ConvertToMarkdown(.md) error: %v", err)
 	}
@@ -453,7 +455,7 @@ func TestConvertToMarkdown_TxtWrappedInCodeBlock(t *testing.T) {
 	content := "some plain text\nwith multiple lines"
 	writeFile(t, dir, "note.txt", content)
 
-	got, err := r.ConvertToMarkdown("note.txt")
+	got, err := r.ConvertToMarkdown(t.Context(), "note.txt")
 	if err != nil {
 		t.Fatalf("ConvertToMarkdown(.txt) error: %v", err)
 	}
@@ -470,7 +472,7 @@ func TestConvertToMarkdown_CsvWrappedInCodeBlock(t *testing.T) {
 	content := "name,age,city\nAlice,30,NYC\nBob,25,LA"
 	writeFile(t, dir, "people.csv", content)
 
-	got, err := r.ConvertToMarkdown("people.csv")
+	got, err := r.ConvertToMarkdown(t.Context(), "people.csv")
 	if err != nil {
 		t.Fatalf("ConvertToMarkdown(.csv) error: %v", err)
 	}
@@ -484,7 +486,7 @@ func TestConvertToMarkdown_CsvWrappedInCodeBlock(t *testing.T) {
 func TestConvertToMarkdown_NotFound(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.ConvertToMarkdown("ghost.md")
+	_, err := r.ConvertToMarkdown(t.Context(), "ghost.md")
 	if err == nil {
 		t.Error("ConvertToMarkdown() for missing file: expected error, got nil")
 	}
@@ -493,7 +495,7 @@ func TestConvertToMarkdown_NotFound(t *testing.T) {
 func TestConvertToMarkdown_InvalidFilename(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.ConvertToMarkdown("../escape.md")
+	_, err := r.ConvertToMarkdown(t.Context(), "../escape.md")
 	if err == nil {
 		t.Error("ConvertToMarkdown() with traversal: expected error, got nil")
 	}
@@ -520,7 +522,7 @@ Final content.
 `
 	writeFile(t, dir, "outline.md", content)
 
-	entries, err := r.GetDocumentOutline("outline.md")
+	entries, err := r.GetDocumentOutline(t.Context(), "outline.md")
 	if err != nil {
 		t.Fatalf("GetDocumentOutline(.md) error: %v", err)
 	}
@@ -555,7 +557,7 @@ func TestGetDocumentOutline_TxtNoHeadings(t *testing.T) {
 	content := "Just some plain text.\nNo headings here.\nNothing special."
 	writeFile(t, dir, "plain.txt", content)
 
-	entries, err := r.GetDocumentOutline("plain.txt")
+	entries, err := r.GetDocumentOutline(t.Context(), "plain.txt")
 	if err != nil {
 		t.Fatalf("GetDocumentOutline(.txt) error: %v", err)
 	}
@@ -573,7 +575,7 @@ func TestGetDocumentOutline_TxtWithMarkdownHeadings(t *testing.T) {
 	content := "# A heading in a txt file\nSome text\n## Another heading"
 	writeFile(t, dir, "mixed.txt", content)
 
-	entries, err := r.GetDocumentOutline("mixed.txt")
+	entries, err := r.GetDocumentOutline(t.Context(), "mixed.txt")
 	if err != nil {
 		t.Fatalf("GetDocumentOutline(.txt with headings) error: %v", err)
 	}
@@ -589,7 +591,7 @@ func TestGetDocumentOutline_TxtWithMarkdownHeadings(t *testing.T) {
 func TestGetDocumentOutline_NotFound(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.GetDocumentOutline("missing.md")
+	_, err := r.GetDocumentOutline(t.Context(), "missing.md")
 	if err == nil {
 		t.Error("GetDocumentOutline() for missing file: expected error, got nil")
 	}
@@ -600,7 +602,7 @@ func TestGetDocumentOutline_UnsupportedFormat(t *testing.T) {
 
 	writeFile(t, dir, "data.csv", "a,b,c")
 
-	_, err := r.GetDocumentOutline("data.csv")
+	_, err := r.GetDocumentOutline(t.Context(), "data.csv")
 	if err == nil {
 		t.Error("GetDocumentOutline(.csv) should return unsupported format error")
 	}
@@ -619,7 +621,7 @@ func TestExtractTables_CSV(t *testing.T) {
 	content := "name,age,city\nAlice,30,NYC\nBob,25,LA"
 	writeFile(t, dir, "people.csv", content)
 
-	tables, err := r.ExtractTables("people.csv", 0)
+	tables, err := r.ExtractTables(t.Context(), "people.csv", 0)
 	if err != nil {
 		t.Fatalf("ExtractTables(.csv) error: %v", err)
 	}
@@ -658,7 +660,7 @@ func TestExtractTables_CSVWithQuotedFields(t *testing.T) {
 "O""Brien",Normal,200`
 	writeFile(t, dir, "quoted.csv", content)
 
-	tables, err := r.ExtractTables("quoted.csv", 0)
+	tables, err := r.ExtractTables(t.Context(), "quoted.csv", 0)
 	if err != nil {
 		t.Fatalf("ExtractTables(.csv quoted) error: %v", err)
 	}
@@ -691,7 +693,7 @@ Some trailing text.
 `
 	writeFile(t, dir, "table.md", content)
 
-	tables, err := r.ExtractTables("table.md", 0)
+	tables, err := r.ExtractTables(t.Context(), "table.md", 0)
 	if err != nil {
 		t.Fatalf("ExtractTables(.md) error: %v", err)
 	}
@@ -722,7 +724,7 @@ func TestExtractTables_EmptyCSV(t *testing.T) {
 	// This documents the current behavior.
 	writeFile(t, dir, "empty.csv", "   ")
 
-	tables, err := r.ExtractTables("empty.csv", 0)
+	tables, err := r.ExtractTables(t.Context(), "empty.csv", 0)
 	if err != nil {
 		t.Fatalf("ExtractTables(empty.csv) error: %v", err)
 	}
@@ -743,7 +745,7 @@ func TestExtractTables_SingleEmptyLineCSV(t *testing.T) {
 	// tablesCSV parses that as 1 row with 1 empty cell, yielding 1 table.
 	writeFile(t, dir, "blank.csv", "")
 
-	tables, err := r.ExtractTables("blank.csv", 0)
+	tables, err := r.ExtractTables(t.Context(), "blank.csv", 0)
 	if err != nil {
 		t.Fatalf("ExtractTables(blank.csv) error: %v", err)
 	}
@@ -760,7 +762,7 @@ func TestExtractTables_PlaintextWithTabs(t *testing.T) {
 	content := "Name\tAge\tCity\nAlice\t30\tNYC\nBob\t25\tLA"
 	writeFile(t, dir, "tabbed.txt", content)
 
-	tables, err := r.ExtractTables("tabbed.txt", 0)
+	tables, err := r.ExtractTables(t.Context(), "tabbed.txt", 0)
 	if err != nil {
 		t.Fatalf("ExtractTables(.txt tabs) error: %v", err)
 	}
@@ -777,7 +779,7 @@ func TestExtractTables_PlaintextWithTabs(t *testing.T) {
 func TestExtractTables_NotFound(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.ExtractTables("missing.csv", 0)
+	_, err := r.ExtractTables(t.Context(), "missing.csv", 0)
 	if err == nil {
 		t.Error("ExtractTables() for missing file: expected error, got nil")
 	}
@@ -788,7 +790,7 @@ func TestExtractTables_UnsupportedFormat(t *testing.T) {
 
 	writeFile(t, dir, "doc.docx", "fake docx")
 
-	_, err := r.ExtractTables("doc.docx", 0)
+	_, err := r.ExtractTables(t.Context(), "doc.docx", 0)
 	if err == nil {
 		t.Error("ExtractTables(.docx) should return unsupported format error")
 	}
@@ -801,7 +803,7 @@ func TestExtractTables_UnsupportedFormat(t *testing.T) {
 func TestReadImage_InvalidExtension(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.ReadImage("document.pdf", "eng")
+	_, err := r.ReadImage(t.Context(), "document.pdf", "eng")
 	if err == nil {
 		t.Error("ReadImage(.pdf) should reject non-image extension")
 	}
@@ -813,7 +815,7 @@ func TestReadImage_InvalidExtension(t *testing.T) {
 func TestReadImage_DirectoryTraversal(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.ReadImage("../secret.png", "eng")
+	_, err := r.ReadImage(t.Context(), "../secret.png", "eng")
 	if err == nil {
 		t.Error("ReadImage() with traversal should be rejected")
 	}
@@ -825,7 +827,7 @@ func TestReadImage_DirectoryTraversal(t *testing.T) {
 func TestReadImage_NotFound(t *testing.T) {
 	r, _ := newTestReader(t)
 
-	_, err := r.ReadImage("missing.png", "eng")
+	_, err := r.ReadImage(t.Context(), "missing.png", "eng")
 	if err == nil {
 		t.Error("ReadImage() for missing file: expected error, got nil")
 	}
@@ -1279,17 +1281,17 @@ func TestDocuments_SymlinkOutsideDirIsRejected(t *testing.T) {
 
 	// Every tool that opens a document by name must refuse the outward link.
 	calls := map[string]func() (any, error){
-		"ReadDocument":        func() (any, error) { return r.ReadDocument("innocent.md", 0) },
-		"SearchDocument":      func() (any, error) { return r.SearchDocument("innocent.md", "SECRET") },
-		"GetDocumentSummary":  func() (any, error) { return r.GetDocumentSummary("innocent.md") },
-		"GetDocumentOutline":  func() (any, error) { return r.GetDocumentOutline("innocent.md") },
-		"ExtractTables":       func() (any, error) { return r.ExtractTables("innocent.md", 0) },
-		"ConvertToMarkdown":   func() (any, error) { return r.ConvertToMarkdown("innocent.md") },
-		"ReadImage":           func() (any, error) { return r.ReadImage("innocent.png", "eng") },
-		"ReadDocumentPages":   func() (any, error) { return r.ReadDocumentPages("innocent.pdf", "1") },
-		"GetDocumentMetadata": func() (any, error) { return r.GetDocumentMetadata("innocent.pdf") },
-		"ExtractImages":       func() (any, error) { return r.ExtractImages("innocent.pdf", 0) },
-		"OCRDocument":         func() (any, error) { return r.OCRDocument("innocent.pdf", 1, "eng") },
+		"ReadDocument":        func() (any, error) { return r.ReadDocument(t.Context(), "innocent.md", 0) },
+		"SearchDocument":      func() (any, error) { return r.SearchDocument(t.Context(), "innocent.md", "SECRET") },
+		"GetDocumentSummary":  func() (any, error) { return r.GetDocumentSummary(t.Context(), "innocent.md") },
+		"GetDocumentOutline":  func() (any, error) { return r.GetDocumentOutline(t.Context(), "innocent.md") },
+		"ExtractTables":       func() (any, error) { return r.ExtractTables(t.Context(), "innocent.md", 0) },
+		"ConvertToMarkdown":   func() (any, error) { return r.ConvertToMarkdown(t.Context(), "innocent.md") },
+		"ReadImage":           func() (any, error) { return r.ReadImage(t.Context(), "innocent.png", "eng") },
+		"ReadDocumentPages":   func() (any, error) { return r.ReadDocumentPages(t.Context(), "innocent.pdf", "1") },
+		"GetDocumentMetadata": func() (any, error) { return r.GetDocumentMetadata(t.Context(), "innocent.pdf") },
+		"ExtractImages":       func() (any, error) { return r.ExtractImages(t.Context(), "innocent.pdf", 0) },
+		"OCRDocument":         func() (any, error) { return r.OCRDocument(t.Context(), "innocent.pdf", 1, "eng") },
 	}
 
 	for name, call := range calls {
@@ -1316,7 +1318,7 @@ func TestDocuments_SymlinkInsideDirStillWorks(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	got, err := r.ReadDocument("alias.txt", 0)
+	got, err := r.ReadDocument(t.Context(), "alias.txt", 0)
 	if err != nil {
 		t.Fatalf("ReadDocument(alias.txt): %v", err)
 	}
@@ -1339,7 +1341,7 @@ func TestListDocuments_OmitsSymlinksThatLeaveTheDir(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	docs, err := r.ListDocuments()
+	docs, err := r.ListDocuments(t.Context())
 	if err != nil {
 		t.Fatalf("ListDocuments() with a dangling symlink must not fail: %v", err)
 	}
@@ -1352,5 +1354,99 @@ func TestListDocuments_OmitsSymlinksThatLeaveTheDir(t *testing.T) {
 
 	if listed != "alias.txt,real.txt" {
 		t.Errorf("ListDocuments() = %s, want alias.txt,real.txt (no outward or dangling links)", listed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 22. Deadlines on the external binaries
+// ---------------------------------------------------------------------------
+
+// writeFakeBinary writes an executable shell script called name into dir and
+// returns its path, so a test can point the reader at it instead of the real
+// poppler or tesseract binary.
+func writeFakeBinary(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("failed to write fake %s: %v", name, err)
+	}
+	return path
+}
+
+// slowBinaryBody sleeps far longer than any test waits. It runs sleep as a
+// child instead of exec'ing it, so the child keeps stdout open after the
+// shell is killed and only WaitDelay lets the call return.
+const slowBinaryBody = "sleep 30\necho too late\n"
+
+// assertStoppedByDeadline checks that a call stopped by a short context
+// deadline reports it through errors.Is and came back in a few seconds.
+func assertStoppedByDeadline(t *testing.T, err error, elapsed time.Duration) {
+	t.Helper()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want an error wrapping context.DeadlineExceeded, got %v", err)
+	}
+
+	// The deadline is 300 ms and WaitDelay adds up to two seconds for the
+	// orphaned sleep; anything near the 30 s of the script means no deadline.
+	if elapsed > 5*time.Second {
+		t.Errorf("call took %s, want it stopped shortly after the deadline", elapsed)
+	}
+}
+
+func TestReadDocument_SlowPdftotextStopsAtDeadline(t *testing.T) {
+	t.Parallel()
+
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "slow.pdf", "%PDF-1.4 never parsed by the fake")
+	r.pdftotextBin = writeFakeBinary(t, t.TempDir(), "pdftotext", slowBinaryBody)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := r.ReadDocument(ctx, "slow.pdf", 0)
+	assertStoppedByDeadline(t, err, time.Since(started))
+}
+
+func TestReadImage_SlowTesseractStopsAtDeadline(t *testing.T) {
+	t.Parallel()
+
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "slow.png", "not really a png")
+	r.tesseractBin = writeFakeBinary(t, t.TempDir(), "tesseract", slowBinaryBody)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := r.ReadImage(ctx, "slow.png", "eng")
+	assertStoppedByDeadline(t, err, time.Since(started))
+}
+
+func TestReadDocument_ToolStderrIsBoundedAndNamesNoPath(t *testing.T) {
+	r, dir := newTestReader(t)
+	writeFile(t, dir, "broken.pdf", "%PDF-1.4 never parsed by the fake")
+
+	// The fake complains about the path it was given, then floods stderr.
+	r.pdftotextBin = writeFakeBinary(t, t.TempDir(), "pdftotext",
+		"for arg; do case $arg in *.pdf) document=$arg;; esac; done\n"+
+			"echo \"Syntax Error: Couldn't open file '$document'\" >&2\n"+
+			"head -c 5000 /dev/zero | tr '\\0' 'x' >&2\n"+
+			"exit 1\n")
+
+	_, err := r.ReadDocument(t.Context(), "broken.pdf", 0)
+	if err == nil {
+		t.Fatal("ReadDocument with a failing pdftotext: want an error, got nil")
+	}
+
+	message := err.Error()
+	if !strings.Contains(message, "Couldn't open file 'broken.pdf'") {
+		t.Errorf("error should carry the stderr with the file name: %q", message)
+	}
+	if strings.Contains(message, dir) {
+		t.Errorf("error leaks the documents directory %s: %q", dir, message)
+	}
+	if len(message) > stderrLimit+200 {
+		t.Errorf("error is %d bytes long, want the stderr cut to %d", len(message), stderrLimit)
 	}
 }
