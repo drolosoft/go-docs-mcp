@@ -54,6 +54,15 @@ var nonPublicPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("100.64.0.0/10"),
 }
 
+// serverInstructions tell a model, at initialize, the order that keeps a
+// long document out of its context until it knows which part it needs.
+// offset and max_chars are read_document's way to slice a text with no
+// pages, such as a long Markdown file.
+const serverInstructions = "Start with list_documents to see which files exist, then call get_document_outline to learn how a document is organised before reading it. " +
+	"Use search_document to find the pages that answer the question, and read_document with page or pages to read only those instead of the whole file. " +
+	"For long text without pages, read_document takes offset and max_chars to read it in slices. " +
+	"Every document is also a docs://{filename} resource with the same text."
+
 func main() {
 	// Determine documents directory: DOCS_MCP_DIR (primary), PDF_MCP_DIR (backward compat), DROLO_DOCS_DIR (legacy)
 	docsDir := os.Getenv("DOCS_MCP_DIR")
@@ -115,14 +124,26 @@ func main() {
 
 // newServer builds the MCP server with every tool registered over reader.
 // main serves it on stdio; tests call it directly to inspect the tools.
-// docsDir is the documents directory the reader was created with.
-func newServer(reader *pdf.Reader, docsDir string) *server.MCPServer {
-	s := server.NewMCPServer(
-		"go-docs-mcp",
-		serverVersion(),
+// docsDir is the documents directory the reader was created with, and extra
+// options are appended to the server's own, which lets a test switch on
+// checks such as output schema validation.
+func newServer(reader *pdf.Reader, docsDir string, extra ...server.ServerOption) *server.MCPServer {
+	// The hooks are filled in after the server exists, because the one that
+	// refreshes resources/list needs the server itself.
+	hooks := &server.Hooks{}
+
+	options := []server.ServerOption{
 		server.WithToolCapabilities(true),
 		server.WithToolHandlerMiddleware(redactPathsMiddleware(docsDir, os.TempDir())),
-	)
+		server.WithResourceCapabilities(false, false),
+		server.WithHooks(hooks),
+		server.WithInstructions(serverInstructions),
+	}
+	options = append(options, extra...)
+
+	s := server.NewMCPServer("go-docs-mcp", serverVersion(), options...)
+
+	registerDocumentResources(s, hooks, reader, docsDir)
 
 	// Register tools (13 total, 12 when read_url is disabled)
 	registerListDocuments(s, reader)
@@ -231,11 +252,59 @@ func redactPaths(message string, roots ...string) string {
 	return message
 }
 
+// documentList is the structured answer of list_documents. MCP wants
+// structuredContent to be a JSON object, so the list the text block prints
+// bare travels here under a name.
+type documentList struct {
+	Documents []pdf.DocumentInfo `json:"documents"`
+}
+
+// formatList is the structured answer of list_formats, the same object its
+// text block has always printed.
+type formatList struct {
+	Formats []pdf.FormatInfo `json:"formats"`
+}
+
+// documentOutline is the structured answer of get_document_outline.
+type documentOutline struct {
+	Outline []pdf.OutlineEntry `json:"outline"`
+}
+
+// documentTables is the structured answer of extract_tables.
+type documentTables struct {
+	Tables []pdf.TableData `json:"tables"`
+}
+
+// structuredResult answers a tool call with structured as structuredContent
+// and printed as the text block. printed is the JSON the tool returned before
+// it had an output schema, so clients that only read text see no change.
+func structuredResult(structured, printed any) *mcp.CallToolResult {
+	data, err := json.MarshalIndent(printed, "", "  ")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Error marshaling results: %v", err))
+	}
+
+	return mcp.NewToolResultStructured(structured, string(data))
+}
+
+// nonNil returns items, or an empty slice when items is nil, so a
+// structured list reaches the client as [] and not as null.
+func nonNil[Item any](items []Item) []Item {
+	if items == nil {
+		return []Item{}
+	}
+
+	return items
+}
+
+// registerListDocuments adds list_documents, which lists the readable files
+// of the documents directory.
 func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("list_documents",
 		mcp.WithDescription("List all documents in the configured directory with format detection and metadata (filename, pages, size). Use this to discover available documents before reading or searching. Read-only."),
 		mcp.WithTitleAnnotation("List Documents"),
 		readOnlyHints(false),
+		mcp.WithOutputSchema[documentList](),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -244,12 +313,9 @@ func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error listing documents: %v", err)), nil
 		}
 
-		data, err := json.MarshalIndent(docs, "", "  ")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling results: %v", err)), nil
-		}
+		structured := documentList{Documents: nonNil(docs)}
 
-		return mcp.NewToolResultText(string(data)), nil
+		return structuredResult(structured, docs), nil
 	})
 }
 
@@ -357,11 +423,14 @@ func registerGetDocumentSummary(s *server.MCPServer, reader *pdf.Reader) {
 	})
 }
 
+// registerGetDocumentMetadata adds get_document_metadata, which reports a
+// document's properties as pdfinfo sees them.
 func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("get_document_metadata",
 		mcp.WithDescription("Get document metadata including title, author, dates, page count, and file size. Use this when you need document properties without reading its content; returns full PDF-specific fields (subject, creator, producer, version) for PDF files. Read-only."),
 		mcp.WithTitleAnnotation("Get Document Metadata"),
 		readOnlyHints(false),
+		mcp.WithOutputSchema[pdf.DocumentMetadata](),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to get metadata for"),
@@ -379,12 +448,7 @@ func registerGetDocumentMetadata(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error getting metadata: %v", err)), nil
 		}
 
-		data, err := json.MarshalIndent(metadata, "", "  ")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling metadata: %v", err)), nil
-		}
-
-		return mcp.NewToolResultText(string(data)), nil
+		return structuredResult(metadata, metadata), nil
 	})
 }
 
@@ -464,6 +528,85 @@ func registerReadURL(s *server.MCPServer, reader *pdf.Reader, fetcher *urlFetche
 	})
 }
 
+// progressNotifier sends notifications/progress for one tool call to the
+// client that made it. It is silent when the call carried no progress token,
+// since the client then asked for none.
+type progressNotifier struct {
+	server *server.MCPServer
+	token  mcp.ProgressToken
+}
+
+// newProgressNotifier reads the progress token of request and the server
+// that is handling it from ctx.
+func newProgressNotifier(ctx context.Context, request mcp.CallToolRequest) progressNotifier {
+	notifier := progressNotifier{server: server.ServerFromContext(ctx)}
+
+	if request.Params.Meta != nil {
+		notifier.token = request.Params.Meta.ProgressToken
+	}
+
+	return notifier
+}
+
+// enabled reports whether notify would send anything, so a caller can skip
+// work that only feeds the messages.
+func (notifier progressNotifier) enabled() bool {
+	return notifier.server != nil && notifier.token != nil
+}
+
+// notify reports progress out of total, which is left out when it is 0
+// because the spec reads a missing total as unknown. A notification that
+// cannot be delivered is dropped: progress is a courtesy and must never fail
+// the call it describes.
+func (notifier progressNotifier) notify(ctx context.Context, progress, total float64, message string) {
+	if !notifier.enabled() {
+		return
+	}
+
+	params := map[string]any{
+		"progressToken": notifier.token,
+		"progress":      progress,
+		"message":       message,
+	}
+	if total > 0 {
+		params["total"] = total
+	}
+
+	_ = notifier.server.SendNotificationToClient(ctx, string(mcp.MethodNotificationProgress), params)
+}
+
+// ocrPageCount returns how many pages an ocr_document call will read: one
+// when it names a page, otherwise the page count pdfinfo reports, or 0 when
+// that is unknown.
+func ocrPageCount(ctx context.Context, reader *pdf.Reader, filename string, page int) int {
+	if page > 0 {
+		return 1
+	}
+
+	metadata, err := reader.GetDocumentMetadata(ctx, filename)
+	if err != nil {
+		return 0
+	}
+
+	return metadata.Pages
+}
+
+// ocrStartMessage is the first progress message of an OCR call.
+func ocrStartMessage(pages int) string {
+	switch pages {
+	case 0:
+		return "starting OCR"
+	case 1:
+		return "starting OCR of 1 page"
+	default:
+		return fmt.Sprintf("starting OCR of %d pages", pages)
+	}
+}
+
+// registerOCRDocument adds ocr_document, which reads a PDF through
+// tesseract. The reader OCRs page by page inside one call and has no hook
+// per page, so a client that asks for progress gets two notifications: the
+// page count before the work and "OCR done" after it.
 func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("ocr_document",
 		mcp.WithDescription("Force OCR text extraction on a PDF, bypassing normal text extraction. Use this when read_document returns garbled or empty text from a scanned PDF; requires tesseract and pdftoppm. Read-only."),
@@ -496,10 +639,21 @@ func registerOCRDocument(s *server.MCPServer, reader *pdf.Reader) {
 		// call brings no language, so the default here must stay empty.
 		language := request.GetString("language", "")
 
+		// The page count costs a pdfinfo run, so it is only asked for when
+		// the client wants to hear about progress.
+		progress := newProgressNotifier(ctx, request)
+		pages := 0
+		if progress.enabled() {
+			pages = ocrPageCount(ctx, reader, filename, page)
+		}
+		progress.notify(ctx, 0, float64(pages), ocrStartMessage(pages))
+
 		text, err := reader.OCRDocument(ctx, filename, page, language)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("OCR error: %v", err)), nil
 		}
+
+		progress.notify(ctx, float64(max(pages, 1)), float64(pages), "OCR done")
 
 		if strings.TrimSpace(text) == "" {
 			return mcp.NewToolResultText("[OCR completed but no text was detected on the page(s)]"), nil
@@ -769,26 +923,20 @@ func isNonPublicAddress(address netip.Addr) bool {
 	return false
 }
 
+// registerListFormats adds list_formats, which says which formats can be
+// read on this machine and what each one needs installed.
 func registerListFormats(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("list_formats",
 		mcp.WithDescription("Show all supported document formats and their dependency installation status. Use this to check which formats are available and diagnose missing dependencies. Read-only."),
 		mcp.WithTitleAnnotation("List Formats"),
 		readOnlyHints(false),
+		mcp.WithOutputSchema[formatList](),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		formats := reader.ListFormats()
+		formats := formatList{Formats: nonNil(reader.ListFormats())}
 
-		result := map[string]interface{}{
-			"formats": formats,
-		}
-
-		data, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling results: %v", err)), nil
-		}
-
-		return mcp.NewToolResultText(string(data)), nil
+		return structuredResult(formats, formats), nil
 	})
 }
 
@@ -829,11 +977,14 @@ func registerReadImage(s *server.MCPServer, reader *pdf.Reader) {
 	})
 }
 
+// registerGetDocumentOutline adds get_document_outline, which lists the
+// headings of a document with their level and page.
 func registerGetDocumentOutline(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("get_document_outline",
 		mcp.WithDescription("Extract the heading structure and table of contents from a document. Use this to understand document organization before reading specific sections; detects numbered sections, ALL-CAPS headings, and markdown # headings. Read-only."),
 		mcp.WithTitleAnnotation("Get Document Outline"),
 		readOnlyHints(false),
+		mcp.WithOutputSchema[documentOutline](),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to extract outline from"),
@@ -851,24 +1002,22 @@ func registerGetDocumentOutline(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error extracting outline: %v", err)), nil
 		}
 
-		if len(outline) == 0 {
-			return mcp.NewToolResultText("[]"), nil
-		}
+		// An empty outline has always printed "[]"; nonNil keeps it that way
+		// in the text and in the structured content alike.
+		entries := nonNil(outline)
 
-		data, err := json.MarshalIndent(outline, "", "  ")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling outline: %v", err)), nil
-		}
-
-		return mcp.NewToolResultText(string(data)), nil
+		return structuredResult(documentOutline{Outline: entries}, entries), nil
 	})
 }
 
+// registerExtractTables adds extract_tables, which finds rows and columns in
+// a document's text.
 func registerExtractTables(s *server.MCPServer, reader *pdf.Reader) {
 	tool := mcp.NewTool("extract_tables",
 		mcp.WithDescription("Extract table-like structures from a document, detecting pipe-delimited, tab-delimited, and multi-space-delimited columns. Use this when you need structured tabular data from a PDF, CSV, or text file. Read-only."),
 		mcp.WithTitleAnnotation("Extract Tables"),
 		readOnlyHints(false),
+		mcp.WithOutputSchema[documentTables](),
 		mcp.WithString("filename",
 			mcp.Required(),
 			mcp.Description("The document filename to extract tables from"),
@@ -891,16 +1040,11 @@ func registerExtractTables(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error extracting tables: %v", err)), nil
 		}
 
-		if len(tables) == 0 {
-			return mcp.NewToolResultText("[]"), nil
-		}
+		// An empty result has always printed "[]"; nonNil keeps it that way
+		// in the text and in the structured content alike.
+		found := nonNil(tables)
 
-		data, err := json.MarshalIndent(tables, "", "  ")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling tables: %v", err)), nil
-		}
-
-		return mcp.NewToolResultText(string(data)), nil
+		return structuredResult(documentTables{Tables: found}, found), nil
 	})
 }
 
