@@ -1,0 +1,78 @@
+name: CI
+
+# Pushes to main and every pull request. Feature branches are covered by
+# their pull request, so they do not run twice.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The Go version comes from go.mod, so CI never drifts from the
+      # toolchain the module declares. setup-go caches the module and build
+      # caches keyed by go.sum.
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Without these binaries the reader tests skip themselves, and CI would
+      # pass without ever running pdftotext, tesseract or pandoc.
+      - name: Install poppler, tesseract and pandoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            poppler-utils tesseract-ocr tesseract-ocr-eng pandoc
+
+      - name: Fmt check
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -cover ./...
+
+      # govulncheck fails only on vulnerabilities the code can reach. A known
+      # advisory in a required module that go-docs-mcp never calls (see
+      # CHANGELOG) is reported but does not fail the job.
+      - name: Vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The author develops on macOS and the reader looks for the binaries in
+      # the Homebrew prefixes, so this job proves that lookup on a real Mac.
+      # Skipping brew's auto-update saves a couple of minutes per run.
+      - name: Install poppler, tesseract and pandoc
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install poppler tesseract pandoc
+
+      - name: Test
+        run: go test -race ./...

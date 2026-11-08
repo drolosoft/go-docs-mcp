@@ -1,0 +1,61 @@
+version: 2
+
+project_name: go-docs-mcp
+
+builds:
+  - id: go-docs-mcp
+    main: .
+    binary: go-docs-mcp
+    # A pure Go binary: poppler, tesseract and pandoc are separate programs
+    # found at run time, so nothing needs cgo and cross-compiling is safe.
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Windows on ARM has no poppler or tesseract builds worth targeting yet.
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    # No -X here: the server reads its version from the module build info,
+    # which Go stamps from the git tag when the tree is clean.
+    ldflags:
+      - -s -w
+    # The commit time instead of the build time, so two builds of the same
+    # tag produce the same files.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# The release notes come from CHANGELOG.md (the release workflow extracts the
+# section of the tag and passes it with --release-notes), not from the commit
+# list.
+changelog:
+  disable: true
+
+release:
+  github:
+    owner: drolosoft
+    name: go-docs-mcp

@@ -32,3 +32,6 @@ Thumbs.db
 
 # Documents directory (user data, not source)
 documents/
+
+# GoReleaser output
+dist/
