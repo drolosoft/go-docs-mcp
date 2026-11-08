@@ -26,9 +26,11 @@ changed its parameters; clients that worked with v1.2.0 keep working.
   at 200 pages per call. Asking for `pages="1-60"` on a one-page document
   used to launch 59 rendering processes and an OCR pass.
 - `read_url` has a 60 s timeout, refuses hosts that resolve to private,
-  loopback, link-local or cloud metadata addresses on the first request and
-  on every redirect, and can be removed from the server entirely with
-  `DOCS_MCP_DISABLE_URL=1`.
+  loopback, link-local, carrier-grade NAT (100.64.0.0/10) or cloud metadata
+  addresses on the first request, on every redirect and again when the
+  socket connects, and can be removed from the server entirely with
+  `DOCS_MCP_DISABLE_URL=1`. To keep that check meaningful, `read_url` no
+  longer honours `HTTP_PROXY`/`HTTPS_PROXY`.
 - Error messages no longer include absolute paths of the host.
 
 ### Changed
