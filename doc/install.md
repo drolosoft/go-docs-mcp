@@ -46,7 +46,8 @@ the server yourself with `claude mcp add`, as shown in the
 ## 📦 Release binaries
 
 Each [release](https://github.com/drolosoft/go-docs-mcp/releases) has five
-archives and a `checksums.txt`:
+archives, the Claude Desktop bundle
+([below](#-claude-desktop-mcpb)) and a `checksums.txt`:
 
 `<version>` is the release number without the "v", `1.4.1` for instance.
 
@@ -120,9 +121,53 @@ claude mcp add docs -- docker run -i --rm -v /path/to/your/documents:/documents:
 
 ---
 
+## 📥 Claude Desktop (.mcpb)
+
+Each release also has `go-docs-mcp_<version>.mcpb`, a bundle that Claude
+Desktop installs as an extension, with no JSON to edit. One file serves
+macOS (Apple silicon and Intel), Windows and Linux: it holds the five
+release binaries and starts the one for the machine.
+
+1. Download the `.mcpb` file from the
+   [release page](https://github.com/drolosoft/go-docs-mcp/releases).
+2. Open it with a double click, or in Claude Desktop go to
+   Settings › Extensions › Install extension and choose the file.
+3. Pick the documents folder when Claude Desktop asks for it. The OCR
+   language (default `eng`) and the switch that removes `read_url` are in
+   the same screen.
+
+To check the file first, download `checksums.txt` next to it and run
+`shasum -a 256 -c --ignore-missing checksums.txt`.
+
+The bundle carries the go-docs-mcp binary only. poppler, tesseract and
+pandoc are still separate programs that you install yourself, and without
+them part of the server does not work:
+
+| Missing | What fails |
+|---------|------------|
+| poppler | Every PDF tool: text, pages, search, metadata, images, outline and tables. Text, Markdown and CSV still work. |
+| tesseract | OCR: `ocr_document`, `read_image` and the OCR fallback for scanned PDF pages. |
+| pandoc | DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF and IPYNB. |
+
+On macOS:
+
+```bash
+brew install poppler tesseract pandoc
+```
+
+Claude Desktop starts the server with a short `PATH` that leaves out
+Homebrew, so the server looks in `/opt/homebrew/bin` and `/usr/local/bin`
+before `PATH`. A Homebrew install works with no extra setting. On Windows
+and Linux, install the programs with the system package manager (see
+[External programs](#-external-programs)) and make sure they are in `PATH`.
+`list_formats` shows which of them the server found.
+
+---
+
 ## 💻 Claude Desktop
 
-Claude Desktop starts MCP servers with a short `PATH` that leaves out most of
+To register the server by hand instead of with the bundle above, edit the
+configuration file. Claude Desktop starts MCP servers with a short `PATH` that leaves out most of
 what your shell has. Two things follow:
 
 - Give `command` the full path of the binary: `which go-docs-mcp` prints it.

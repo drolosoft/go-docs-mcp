@@ -1,4 +1,4 @@
-.PHONY: build install test clean fmt vet vuln check snapshot docker
+.PHONY: build install test clean fmt vet vuln check snapshot manifest mcpb docker
 
 build:
 	go build -o go-docs-mcp .
@@ -26,6 +26,16 @@ check: fmt vet vuln
 # A local build of the release binary for this machine, into dist/.
 snapshot:
 	goreleaser build --snapshot --clean --single-target
+
+# Rewrites the tools of mcpb/manifest.json from the server's own tools/list.
+manifest:
+	go generate ./...
+
+# A local snapshot of the whole release into dist/, the .mcpb bundle
+# included, then the staged bundle checked with the MCPB CLI (needs Node).
+mcpb:
+	goreleaser release --snapshot --clean --skip=publish
+	npx -y @anthropic-ai/mcpb@2.1.2 validate dist/mcpb
 
 docker:
 	docker build -t go-docs-mcp .
