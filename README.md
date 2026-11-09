@@ -11,9 +11,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
-> **Install and Go.** One command, single binary. Your AI reads any document — PDF, text, Markdown, Office files, EPUB, HTML, notebooks, images.
+> **Install and Go.** One command, single binary. Your AI reads any document: PDF, text, Markdown, Office files, EPUB, HTML, notebooks, images.
 
-MCP server for multi-format document access — read, search, extract images, OCR, and fetch documents from URLs via the [Model Context Protocol](https://modelcontextprotocol.io). 13 tools, 14 formats, zero configuration.
+MCP server for multi-format document access: read, search, extract images, OCR, and fetch documents from URLs via the [Model Context Protocol](https://modelcontextprotocol.io). 13 tools, 14 formats, zero configuration.
 
 ```bash
 go install github.com/drolosoft/go-docs-mcp@latest
@@ -26,7 +26,7 @@ For a deeper look at why an MCP server beats a direct tool, see **[Why MCP?](doc
 
 ## 🏆 Why Go-Docs MCP?
 
-Every other document MCP server handles **one format** — a PDF server for PDFs, a DOCX server for DOCX. You'd need three separate servers to read three formats.
+Every other document MCP server handles **one format**: a PDF server for PDFs, a DOCX server for DOCX. You'd need three separate servers to read three formats.
 
 | | Go-Docs MCP | Others |
 |--|:---:|:---:|
@@ -42,11 +42,11 @@ Every other document MCP server handles **one format** — a PDF server for PDFs
 | Smart caching | **Yes** | No |
 | Fully offline | **Yes** | Yes |
 
-Go-Docs MCP reads them all from a single binary — fast, secure, and dependency-free at runtime.
+Go-Docs MCP reads them all from a single binary.
 
 ---
 
-## 📋 Features — 13 Tools
+## 📋 Features: 13 Tools
 
 | Category | Tool | Description |
 |----------|------|-------------|
@@ -66,13 +66,13 @@ Go-Docs MCP reads them all from a single binary — fast, secure, and dependency
 
 **Highlights:**
 
-- **Fast** — mtime-based in-memory caching avoids redundant extraction
-- **Multi-format** — PDF, text, Markdown, CSV, DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, Jupyter notebooks and images from one server
-- **Paged output** — `offset` and `max_chars` on the text tools, so a 200 MB file never floods the model
-- **Resources** — every document is also a `docs://` resource, so Claude Code can @-mention it
-- **OCR** — automatic fallback to tesseract for scanned documents
-- **Secure** — directory-locked with path traversal prevention
-- **Portable** — works on macOS and Linux
+- **Fast:** mtime-based in-memory caching avoids redundant extraction
+- **Multi-format:** PDF, text, Markdown, CSV, DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, Jupyter notebooks and images from one server
+- **Paged output:** `offset` and `max_chars` on the text tools, so a 200 MB file never floods the model
+- **Resources:** every document is also a `docs://` resource, so Claude Code can @-mention it
+- **OCR:** automatic fallback to tesseract for scanned documents
+- **Secure:** directory-locked with path traversal prevention
+- **Portable:** works on macOS and Linux
 
 ---
 
@@ -428,12 +428,12 @@ Extracts text from an image file using OCR. Supports PNG, JPG, WebP, TIFF and BM
 
 ## 🔒 Security
 
-- **Confined to one directory** — every file is resolved with its symlinks and must end up inside `DOCS_MCP_DIR`. A symlink that points outside is not listed and cannot be read. Filenames with path separators or `../` are rejected before that.
-- **Extension filter** — only supported formats are served.
-- **Read-only** — the server never writes inside `DOCS_MCP_DIR`, and every tool is announced to clients as read-only, non-destructive and idempotent.
-- **Timeouts on every external process** — poppler, tesseract and pandoc run under a context deadline (60 s per extraction, 120 s per OCR page, 10 min per OCR call) and are killed when it passes. Page ranges are checked against the real page count and capped at 200 pages per call.
-- **`read_url`** — 60 s timeout, 50MB limit, `application/pdf` or `text/*` only, temp files removed right after reading. Hosts that resolve to private, loopback, link-local or cloud metadata addresses are refused, on the first request and on every redirect. Set `DOCS_MCP_DISABLE_URL=1` to drop the tool from the server if your documents may contain untrusted instructions. Environment proxies are ignored unless `DOCS_MCP_URL_PROXY=1`, because behind a proxy the connect-time check would judge the proxy, not the target.
-- **Bounded results** — text tools return pages of at most 200,000 characters, search shows at most 500 matches and images stop at 8 MB per call; any tool result over 9 MB is replaced with an error. The text cache is capped by `DOCS_MCP_CACHE_MB`.
+- **Confined to one directory:** every file is resolved with its symlinks and must end up inside `DOCS_MCP_DIR`. A symlink that points outside is not listed and cannot be read. Filenames with path separators or `../` are rejected before that.
+- **Extension filter:** only supported formats are served.
+- **Read-only:** the server never writes inside `DOCS_MCP_DIR`, and every tool is announced to clients as read-only, non-destructive and idempotent.
+- **Timeouts on every external process:** poppler, tesseract and pandoc run under a context deadline (60 s per extraction, 120 s per OCR page, 10 min per OCR call) and are killed when it passes. Page ranges are checked against the real page count and capped at 200 pages per call.
+- **`read_url`:** 60 s timeout, 50MB limit, `application/pdf` or `text/*` only, temp files removed right after reading. Hosts that resolve to private, loopback, link-local or cloud metadata addresses are refused, on the first request and on every redirect. Set `DOCS_MCP_DISABLE_URL=1` to drop the tool from the server if your documents may contain untrusted instructions. Environment proxies are ignored unless `DOCS_MCP_URL_PROXY=1`, because behind a proxy the connect-time check would judge the proxy, not the target.
+- **Bounded results:** text tools return pages of at most 200,000 characters, search shows at most 500 matches and images stop at 8 MB per call; any tool result over 9 MB is replaced with an error. The text cache is capped by `DOCS_MCP_CACHE_MB`.
 - **Error messages** carry file names, never absolute paths of the host.
 
 How to report a problem is in [SECURITY.md](SECURITY.md).
@@ -491,4 +491,4 @@ go-docs-mcp/
 
 ---
 
-**[Drolosoft](https://drolosoft.com)** — *Tools we wish existed*
+**[Drolosoft](https://drolosoft.com)**: *Tools we wish existed*
