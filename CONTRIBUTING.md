@@ -17,7 +17,7 @@ The server is a single Go binary, but it calls these programs at run time:
 |------|----------|-------|---------------|
 | poppler (`pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`) | PDF text, metadata, images | `brew install poppler` | `apt install poppler-utils` |
 | tesseract | OCR of scanned PDFs and images | `brew install tesseract` | `apt install tesseract-ocr tesseract-ocr-eng` |
-| pandoc | DOCX | `brew install pandoc` | `apt install pandoc` |
+| pandoc | DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, IPYNB | `brew install pandoc` | `apt install pandoc` |
 
 Tests that need a missing tool skip themselves. Install all three before you
 send a change to the reader, so the tests run the real binaries. CI does.

@@ -72,7 +72,7 @@ Go-Docs MCP reads them all from a single binary.
 - **Resources:** every document is also a `docs://` resource, so Claude Code can @-mention it
 - **OCR:** automatic fallback to tesseract for scanned documents
 - **Secure:** directory-locked with path traversal prevention
-- **Portable:** works on macOS and Linux
+- **Portable:** works on macOS, Linux and Windows
 
 ---
 
