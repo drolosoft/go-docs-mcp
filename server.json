@@ -1,0 +1,81 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.drolosoft/go-docs-mcp",
+  "title": "go-docs-mcp",
+  "description": "Lets your AI read PDF, Office files, EPUB, HTML, Jupyter and images, with OCR, search and paging.",
+  "version": "1.4.0",
+  "repository": {
+    "url": "https://github.com/drolosoft/go-docs-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://drolosoft.com/go-docs-mcp.html",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/drolosoft/go-docs-mcp/main/assets/icon.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "2048x2048"
+      ]
+    }
+  ],
+  "packages": [],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "install": {
+        "homebrew": "brew install drolosoft/tap/go-docs-mcp",
+        "go": "go install github.com/drolosoft/go-docs-mcp@latest",
+        "binaries": "https://github.com/drolosoft/go-docs-mcp/releases",
+        "claudeCodePlugin": "go-docs-mcp in the drolosoft/claude-plugins marketplace"
+      },
+      "transport": "stdio",
+      "requirements": {
+        "poppler": "required: pdftotext, pdfinfo and pdfimages for PDF text, metadata and images",
+        "tesseract": "optional: OCR of scanned PDFs and images",
+        "pandoc": "optional: DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF and IPYNB"
+      },
+      "environmentVariables": [
+        {
+          "name": "DOCS_MCP_DIR",
+          "description": "Folder with the documents to serve. When unset the server uses ~/.docs-mcp/documents/.",
+          "format": "filepath",
+          "isRequired": true
+        },
+        {
+          "name": "DOCS_MCP_DISABLE_URL",
+          "description": "Set to 1 to remove the read_url tool.",
+          "isRequired": false
+        },
+        {
+          "name": "DOCS_MCP_OCR_LANG",
+          "description": "Tesseract language for OCR, for example spa or eng+spa. Default eng.",
+          "isRequired": false
+        },
+        {
+          "name": "DOCS_MCP_CACHE_MB",
+          "description": "Cap of the extracted text cache in MB. Default 256, 0 disables it.",
+          "isRequired": false
+        },
+        {
+          "name": "DOCS_MCP_URL_PROXY",
+          "description": "Set to 1 so read_url honours HTTP_PROXY and HTTPS_PROXY.",
+          "isRequired": false
+        }
+      ],
+      "tools": [
+        "list_documents",
+        "list_formats",
+        "read_document",
+        "read_url",
+        "convert_to_markdown",
+        "search_document",
+        "get_document_summary",
+        "get_document_metadata",
+        "get_document_outline",
+        "extract_tables",
+        "extract_images",
+        "ocr_document",
+        "read_image"
+      ]
+    }
+  }
+}
