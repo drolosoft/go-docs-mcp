@@ -1,0 +1,134 @@
+{
+  "manifest_version": "0.3",
+  "name": "go-docs-mcp",
+  "display_name": "Go-Docs MCP",
+  "version": "0.0.0-dev",
+  "description": "Lets your AI read PDF, Office files, EPUB, HTML, Jupyter and images, with OCR, search and paging.",
+  "long_description": "go-docs-mcp serves the documents of one folder to Claude: PDF, DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, Jupyter notebooks, plain text, Markdown, CSV and images. Every tool is read-only, and the server never writes into the folder.\n\n**What this bundle does not include.** The bundle carries the go-docs-mcp binary only. It calls three programs that are not part of it and that you install yourself:\n\n- **poppler** (`pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`): without it, PDF files cannot be read. Text, Markdown and CSV still work.\n- **tesseract**: without it there is no OCR, so scanned PDFs and images give no text.\n- **pandoc**: without it, DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF and IPYNB files cannot be read.\n\nOn macOS, install them with `brew install poppler tesseract pandoc`. Claude Desktop starts the server with a short `PATH`, so the server looks in `/opt/homebrew/bin` and `/usr/local/bin` first, which is where Homebrew puts them. On Windows and Linux, install them with the system package manager and make sure they are in `PATH`. The `list_formats` tool shows which of them the server found.",
+  "author": {
+    "name": "Drolosoft",
+    "url": "https://drolosoft.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/drolosoft/go-docs-mcp"
+  },
+  "homepage": "https://drolosoft.com/go-docs-mcp.html",
+  "documentation": "https://github.com/drolosoft/go-docs-mcp/blob/main/doc/install.md",
+  "support": "https://github.com/drolosoft/go-docs-mcp/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/go-docs-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/server/go-docs-mcp",
+      "args": [],
+      "env": {
+        "DOCS_MCP_DIR": "${user_config.documents_dir}",
+        "DOCS_MCP_OCR_LANG": "${user_config.ocr_language}",
+        "DOCS_MCP_DISABLE_URL": "${user_config.disable_read_url}"
+      },
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}/server/windows-amd64/go-docs-mcp.exe"
+        }
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "convert_to_markdown",
+      "description": "Convert a document to clean Markdown format. Use this when you need structured, readable output from any document; for PDFs headings are detected and formatted, for TXT/CSV content is wrapped in code blocks, and MD files are returned as-is. Long output comes in pages of max_chars characters, like read_document. Read-only."
+    },
+    {
+      "name": "extract_images",
+      "description": "Extract the embedded images of a PDF as PNG image content, scaled to at most 1600 px on the longer side, 10 per call by default and 8 MB in total. Soft masks are not returned as images. Use this when you need to see figures, charts, or photos embedded in a PDF document. Read-only."
+    },
+    {
+      "name": "extract_tables",
+      "description": "Extract table-like structures from a document, detecting pipe-delimited, tab-delimited, and multi-space-delimited columns. Use this when you need structured tabular data from a PDF, CSV, or text file. Read-only."
+    },
+    {
+      "name": "get_document_metadata",
+      "description": "Get document metadata including title, author, dates, page count, and file size. Use this when you need document properties without reading its content; returns full PDF-specific fields (subject, creator, producer, version) for PDF files. Read-only."
+    },
+    {
+      "name": "get_document_outline",
+      "description": "Extract the heading structure and table of contents from a document. Use this to understand document organization before reading specific sections; detects numbered sections, ALL-CAPS headings, and markdown # headings. Read-only."
+    },
+    {
+      "name": "get_document_summary",
+      "description": "Get a quick summary by extracting the first 3 pages or ~100 lines of a document. Use this to preview document content before deciding to read it in full. Read-only."
+    },
+    {
+      "name": "list_documents",
+      "description": "List all documents in the configured directory with format detection and metadata (filename, pages, size). Use this to discover available documents before reading or searching. Read-only."
+    },
+    {
+      "name": "list_formats",
+      "description": "Show all supported document formats and their dependency installation status. Use this to check which formats are available and diagnose missing dependencies. Read-only."
+    },
+    {
+      "name": "ocr_document",
+      "description": "Force OCR text extraction on a PDF, bypassing normal text extraction. Use this when read_document returns garbled or empty text from a scanned PDF; requires tesseract and pdftoppm. Read-only."
+    },
+    {
+      "name": "read_document",
+      "description": "Read text content from a document with optional page selection. Use this when you need the raw text of a PDF, TXT, MD, CSV, DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF or IPYNB file; TXT/MD/CSV are returned verbatim, the Office, EPUB, HTML, RTF and notebook formats via pandoc; PDFs support page ranges (e.g. \"1-5\", \"1-3,7,10-12\") and auto-OCR fallback for scanned pages. Long texts come in pages of max_chars characters; a truncated result ends with the offset to ask for next. Read-only."
+    },
+    {
+      "name": "read_image",
+      "description": "Extract text from a standalone image file (PNG, JPG, WebP, TIFF, BMP) using OCR. Use this when you need to read text from an image rather than a document; supports multiple languages via tesseract. Read-only."
+    },
+    {
+      "name": "read_url",
+      "description": "Download a document from a URL and extract its text content (max 50MB). Use this when the document is hosted online rather than in the local directory; supports PDF and plain text URLs. Read-only, downloads to a temporary file."
+    },
+    {
+      "name": "search_document",
+      "description": "Search for text within a document and return matching lines with context and approximate page numbers. Use this when you need to find specific content without reading the entire document. Read-only."
+    }
+  ],
+  "keywords": [
+    "documents",
+    "pdf",
+    "ocr",
+    "docx",
+    "xlsx",
+    "pptx",
+    "epub",
+    "markdown",
+    "pandoc",
+    "tesseract"
+  ],
+  "license": "MIT",
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "user_config": {
+    "documents_dir": {
+      "type": "directory",
+      "title": "Documents folder",
+      "description": "The folder whose documents Claude can read. The server only reads it.",
+      "required": true
+    },
+    "ocr_language": {
+      "type": "string",
+      "title": "OCR language",
+      "description": "Tesseract language for OCR when a call names none: eng, spa, or several joined with +, such as eng+spa. The language data must be installed.",
+      "required": false,
+      "default": "eng"
+    },
+    "disable_read_url": {
+      "type": "boolean",
+      "title": "Turn off read_url",
+      "description": "Removes the read_url tool, so the server never reaches the network.",
+      "required": false,
+      "default": false
+    }
+  }
+}

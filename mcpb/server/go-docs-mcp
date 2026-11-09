@@ -1,0 +1,25 @@
+#!/bin/sh
+# Claude Desktop runs this file on macOS and Linux. The bundle carries one
+# go-docs-mcp binary per system and CPU, and platform_overrides in
+# manifest.json can only tell the systems apart, so this script picks the
+# binary for the CPU it runs on. Windows has its own entry in the manifest.
+
+# An MCP client may start the server with an empty PATH, and uname lives in
+# one of these two folders on every macOS and Linux.
+PATH="${PATH:-/usr/bin:/bin}"
+
+# The folder of this script, where the per-target folders are.
+bundle_server_dir=${0%/*}
+
+case "$(uname -s)-$(uname -m)" in
+	Darwin-arm64) target=darwin-arm64 ;;
+	Darwin-x86_64) target=darwin-amd64 ;;
+	Linux-x86_64) target=linux-amd64 ;;
+	Linux-aarch64 | Linux-arm64) target=linux-arm64 ;;
+	*)
+		echo "go-docs-mcp: this bundle has no binary for $(uname -s) $(uname -m)" >&2
+		exit 1
+		;;
+esac
+
+exec "$bundle_server_dir/$target/go-docs-mcp" "$@"
