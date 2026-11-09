@@ -78,98 +78,38 @@ Go-Docs MCP reads them all from a single binary — fast, secure, and dependency
 
 ## 📄 Supported Formats
 
-| Format | Dependencies | Notes |
-|--------|-------------|-------|
-| PDF | poppler (`pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`) | Full support — text, images, metadata, OCR fallback |
-| TXT, MD, CSV | None | Native, zero dependencies. CSV is parsed with `encoding/csv`, so quoted newlines work |
-| DOCX, XLSX, PPTX, ODT | pandoc (optional) | Office documents, text and tables |
-| EPUB, HTML, RTF, IPYNB | pandoc (optional) | Books, web pages, rich text and Jupyter notebooks |
-| Images (PNG, JPG, WebP, TIFF, BMP) | tesseract (optional) | OCR text extraction; listed by `list_documents` with `"type": "image"` |
+- **PDF** with poppler, and tesseract for scanned pages
+- **TXT, MD, CSV** with no external program
+- **DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, IPYNB** with pandoc
+- **Images** (PNG, JPG, WebP, TIFF, BMP) with tesseract
 
-`convert_to_markdown` returns GitHub-flavoured Markdown for every pandoc-backed format.
-
----
-
-## 📦 Prerequisites
-
-- **Go 1.27.3+** ([install](https://go.dev/doc/install))
-- **poppler** — required for PDF support
-- **tesseract** _(optional)_ — enables OCR for scanned docs and images
-- **pandoc** _(optional)_ — enables DOCX support
-
-```bash
-# macOS
-brew install poppler
-brew install tesseract        # optional: OCR
-brew install pandoc           # optional: DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, IPYNB
-
-# Debian/Ubuntu
-apt install poppler-utils
-apt install tesseract-ocr     # optional: OCR
-apt install pandoc            # optional: Office, EPUB, HTML, RTF, IPYNB
-
-# Fedora/RHEL
-dnf install poppler-utils
-dnf install tesseract         # optional: OCR
-dnf install pandoc            # optional: Office, EPUB, HTML, RTF, IPYNB
-```
-
-> **Note:** TXT, MD, and CSV work out of the box with zero dependencies. Install only what you need.
+What each format supports, the `type` values of `list_documents` and the
+limits of a call are in **[doc/formats.md](doc/formats.md)**.
 
 ---
 
 ## 🚀 Installation
 
-### Homebrew (macOS and Linux)
-
 ```bash
-brew install drolosoft/tap/go-docs-mcp   # brings poppler, tesseract and pandoc with it
+brew install drolosoft/tap/go-docs-mcp   # macOS and Linux, brings poppler, tesseract and pandoc
 ```
 
-### Prebuilt binaries
+Or, with Go 1.27.3 or later, `go install github.com/drolosoft/go-docs-mcp@latest`
+and install poppler (plus tesseract and pandoc if you need them) yourself.
 
-Every release on the [releases page](https://github.com/drolosoft/go-docs-mcp/releases) ships archives for macOS (Apple Silicon and Intel), Linux (amd64 and arm64) and Windows (amd64), with a `checksums.txt` to verify them.
-
-### Docker
-
-```bash
-docker build -t go-docs-mcp .
-docker run -i --rm -v /path/to/your/documents:/documents go-docs-mcp
-```
-
-The image runs as a non-root user, includes poppler, tesseract (English data) and pandoc, and serves `/documents`.
-
-### From source
-
-```bash
-go install github.com/drolosoft/go-docs-mcp@latest
-```
-
-### Build locally
-
-```bash
-git clone https://github.com/drolosoft/go-docs-mcp.git
-cd go-docs-mcp
-make build      # produces ./go-docs-mcp
-make install    # installs to /usr/local/bin/
-```
+The Claude Code plugin, the release archives and how to check them, Docker,
+Claude Desktop and the commands for each package manager are in
+**[doc/install.md](doc/install.md)**.
 
 ---
 
 ## ⚙️ Configuration
 
-Go-Docs MCP reads documents from a configured directory. Set `DOCS_MCP_DIR` to change it:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DOCS_MCP_DIR` | `~/.docs-mcp/documents/` | Directory containing documents to serve |
-| `PDF_MCP_DIR` | _(legacy alias)_ | Backward-compatible alias for `DOCS_MCP_DIR` |
-| `DOCS_MCP_OCR_LANG` | `eng` | Tesseract language used when a call brings none |
-| `DOCS_MCP_CACHE_MB` | `256` | Upper bound of the in-memory text cache; least recently used documents are evicted first, `0` turns it off |
-| `DOCS_MCP_DISABLE_URL` | _(unset)_ | Set to `1` to remove the `read_url` tool |
-| `DOCS_MCP_URL_PROXY` | _(unset)_ | Set to `1` to let `read_url` honour `HTTP_PROXY`/`HTTPS_PROXY`. Off by default: with a proxy the connect-time address check cannot see the real target |
-
-Place your documents in the directory and the server finds them automatically. All supported formats are detected.
+The server reads the documents in `DOCS_MCP_DIR` (default `~/.docs-mcp/documents/`)
+and finds every supported file in it; files added while it runs show up on
+the next call. The other
+settings (OCR language, cache size, `read_url` switches) are listed in
+[doc/install.md](doc/install.md#-configuration).
 
 ### Resources
 
@@ -208,20 +148,9 @@ Or add it to the `.mcp.json` of the project you want it in:
 
 ### With Claude Desktop
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
-
-```json
-{
-  "mcpServers": {
-    "docs": {
-      "command": "/usr/local/bin/go-docs-mcp",
-      "env": {
-        "DOCS_MCP_DIR": "/path/to/your/documents"
-      }
-    }
-  }
-}
-```
+Claude Desktop needs the full path of the binary, and finds poppler, tesseract
+and pandoc only in some folders. The config and what to do when they are
+elsewhere are in [doc/install.md](doc/install.md#-claude-desktop).
 
 ### With any MCP client
 
@@ -530,6 +459,10 @@ go-docs-mcp/
   internal/
     pdf/
       reader.go        # Document extraction, caching, search, metadata, images, OCR
+  doc/
+    formats.md         # What each format supports, limits of a call
+    install.md         # Install paths, Claude Desktop, env vars
+    WHY-MCP.md         # Why an MCP server and not a direct tool
   Makefile             # Build targets
   go.mod               # Module definition
 ```
