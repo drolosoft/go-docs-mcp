@@ -3,7 +3,7 @@
   "name": "io.github.drolosoft/go-docs-mcp",
   "title": "go-docs-mcp",
   "description": "Lets your AI read PDF, Office files, EPUB, HTML, Jupyter and images, with OCR, search and paging.",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "repository": {
     "url": "https://github.com/drolosoft/go-docs-mcp",
     "source": "github"

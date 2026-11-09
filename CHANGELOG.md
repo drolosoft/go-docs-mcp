@@ -6,13 +6,25 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v1.4.1] - 2026-11-09
+
+Documentation and listings. The server itself is the same as v1.4.0.
+
+### Added
+
+- go-docs-mcp is listed in the official MCP Registry as
+  `io.github.drolosoft/go-docs-mcp`. Each release publishes its
+  `server.json` there, with the version taken from the tag.
+- `doc/formats.md`: what each format supports, which external tool it
+  needs and the limits of a call.
+- `doc/install.md`: every way to install (Homebrew, the Claude Code plugin,
+  the release archives, `go install`, a local Docker build), Claude Desktop
+  and the environment variables.
+
 ### Changed
 
-- Repository metadata, a social preview image and `server.json` updated
-  for the registries. `glama.json` already had the only field Glama's
-  schema defines (`maintainers`).
-- The release workflow publishes `server.json` to the official MCP
-  Registry after GoReleaser, with the version taken from the tag.
+- The README is shorter and links to those two pages.
+- The repository description and topics name the formats added in v1.4.0.
 
 ## [v1.4.0] - 2026-11-08
 
@@ -142,7 +154,8 @@ changed its parameters; clients that worked with v1.2.0 keep working.
 Initial public releases: 12 tools over PDF, TXT, MD, CSV, DOCX and images,
 stdio transport, mtime cache, OCR fallback with tesseract.
 
-[Unreleased]: https://github.com/drolosoft/go-docs-mcp/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/drolosoft/go-docs-mcp/compare/v1.4.1...HEAD
+[v1.4.1]: https://github.com/drolosoft/go-docs-mcp/compare/v1.4.0...v1.4.1
 [v1.4.0]: https://github.com/drolosoft/go-docs-mcp/compare/v1.3.0...v1.4.0
 [v1.3.0]: https://github.com/drolosoft/go-docs-mcp/compare/v1.2.0...v1.3.0
 [v1.2.0]: https://github.com/drolosoft/go-docs-mcp/compare/v1.1.0...v1.2.0
