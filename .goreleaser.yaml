@@ -43,6 +43,24 @@ archives:
       - README.md
       - CHANGELOG.md
 
+# Packs the Claude Desktop bundle (.mcpb) from the binaries above, before the
+# checksums are taken. GoReleaser OSS has no global after hook (it is a Pro
+# feature) and extra_files are only collected, never made, so this borrows the
+# one step that runs a command between the build and the checksums: an SBOM
+# entry with artifacts "any". What it declares in documents is added to the
+# release and to checksums.txt like any other asset, so no extra_files entry
+# is needed. It is not an SBOM; the id says what it is.
+sboms:
+  - id: mcpb
+    artifacts: any
+    cmd: ../scripts/pack-mcpb.sh
+    args:
+      - "."
+      - "{{ .Version }}"
+      - "$document"
+    documents:
+      - "{{ .ProjectName }}_{{ .Version }}.mcpb"
+
 checksum:
   name_template: checksums.txt
 
