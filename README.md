@@ -11,9 +11,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
-> **Install and Go.** One command, single binary. Your AI reads any document — PDF, text, Markdown, Office files, EPUB, HTML, notebooks, images.
+> **Install and Go.** One command, single binary. Your AI reads any document: PDF, text, Markdown, Office files, EPUB, HTML, notebooks, images.
 
-MCP server for multi-format document access — read, search, extract images, OCR, and fetch documents from URLs via the [Model Context Protocol](https://modelcontextprotocol.io). 13 tools, 14 formats, zero configuration.
+MCP server for multi-format document access: read, search, extract images, OCR, and fetch documents from URLs via the [Model Context Protocol](https://modelcontextprotocol.io). 13 tools, 14 formats, zero configuration.
 
 ```bash
 go install github.com/drolosoft/go-docs-mcp@latest
@@ -26,7 +26,7 @@ For a deeper look at why an MCP server beats a direct tool, see **[Why MCP?](doc
 
 ## 🏆 Why Go-Docs MCP?
 
-Every other document MCP server handles **one format** — a PDF server for PDFs, a DOCX server for DOCX. You'd need three separate servers to read three formats.
+Every other document MCP server handles **one format**: a PDF server for PDFs, a DOCX server for DOCX. You'd need three separate servers to read three formats.
 
 | | Go-Docs MCP | Others |
 |--|:---:|:---:|
@@ -42,11 +42,11 @@ Every other document MCP server handles **one format** — a PDF server for PDFs
 | Smart caching | **Yes** | No |
 | Fully offline | **Yes** | Yes |
 
-Go-Docs MCP reads them all from a single binary — fast, secure, and dependency-free at runtime.
+Go-Docs MCP reads them all from a single binary.
 
 ---
 
-## 📋 Features — 13 Tools
+## 📋 Features: 13 Tools
 
 | Category | Tool | Description |
 |----------|------|-------------|
@@ -66,110 +66,50 @@ Go-Docs MCP reads them all from a single binary — fast, secure, and dependency
 
 **Highlights:**
 
-- **Fast** — mtime-based in-memory caching avoids redundant extraction
-- **Multi-format** — PDF, text, Markdown, CSV, DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, Jupyter notebooks and images from one server
-- **Paged output** — `offset` and `max_chars` on the text tools, so a 200 MB file never floods the model
-- **Resources** — every document is also a `docs://` resource, so Claude Code can @-mention it
-- **OCR** — automatic fallback to tesseract for scanned documents
-- **Secure** — directory-locked with path traversal prevention
-- **Portable** — works on macOS and Linux
+- **Fast:** mtime-based in-memory caching avoids redundant extraction
+- **Multi-format:** PDF, text, Markdown, CSV, DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, Jupyter notebooks and images from one server
+- **Paged output:** `offset` and `max_chars` on the text tools, so a 200 MB file never floods the model
+- **Resources:** every document is also a `docs://` resource, so Claude Code can @-mention it
+- **OCR:** automatic fallback to tesseract for scanned documents
+- **Secure:** directory-locked with path traversal prevention
+- **Portable:** works on macOS and Linux
 
 ---
 
 ## 📄 Supported Formats
 
-| Format | Dependencies | Notes |
-|--------|-------------|-------|
-| PDF | poppler (`pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`) | Full support — text, images, metadata, OCR fallback |
-| TXT, MD, CSV | None | Native, zero dependencies. CSV is parsed with `encoding/csv`, so quoted newlines work |
-| DOCX, XLSX, PPTX, ODT | pandoc (optional) | Office documents, text and tables |
-| EPUB, HTML, RTF, IPYNB | pandoc (optional) | Books, web pages, rich text and Jupyter notebooks |
-| Images (PNG, JPG, WebP, TIFF, BMP) | tesseract (optional) | OCR text extraction; listed by `list_documents` with `"type": "image"` |
+- **PDF** with poppler, and tesseract for scanned pages
+- **TXT, MD, CSV** with no external program
+- **DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, IPYNB** with pandoc
+- **Images** (PNG, JPG, WebP, TIFF, BMP) with tesseract
 
-`convert_to_markdown` returns GitHub-flavoured Markdown for every pandoc-backed format.
-
----
-
-## 📦 Prerequisites
-
-- **Go 1.27.3+** ([install](https://go.dev/doc/install))
-- **poppler** — required for PDF support
-- **tesseract** _(optional)_ — enables OCR for scanned docs and images
-- **pandoc** _(optional)_ — enables DOCX support
-
-```bash
-# macOS
-brew install poppler
-brew install tesseract        # optional: OCR
-brew install pandoc           # optional: DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, IPYNB
-
-# Debian/Ubuntu
-apt install poppler-utils
-apt install tesseract-ocr     # optional: OCR
-apt install pandoc            # optional: Office, EPUB, HTML, RTF, IPYNB
-
-# Fedora/RHEL
-dnf install poppler-utils
-dnf install tesseract         # optional: OCR
-dnf install pandoc            # optional: Office, EPUB, HTML, RTF, IPYNB
-```
-
-> **Note:** TXT, MD, and CSV work out of the box with zero dependencies. Install only what you need.
+What each format supports, the `type` values of `list_documents` and the
+limits of a call are in **[doc/formats.md](doc/formats.md)**.
 
 ---
 
 ## 🚀 Installation
 
-### Homebrew (macOS and Linux)
-
 ```bash
-brew install drolosoft/tap/go-docs-mcp   # brings poppler, tesseract and pandoc with it
+brew install drolosoft/tap/go-docs-mcp   # macOS and Linux, brings poppler, tesseract and pandoc
 ```
 
-### Prebuilt binaries
+Or, with Go 1.27.3 or later, `go install github.com/drolosoft/go-docs-mcp@latest`
+and install poppler (plus tesseract and pandoc if you need them) yourself.
 
-Every release on the [releases page](https://github.com/drolosoft/go-docs-mcp/releases) ships archives for macOS (Apple Silicon and Intel), Linux (amd64 and arm64) and Windows (amd64), with a `checksums.txt` to verify them.
-
-### Docker
-
-```bash
-docker build -t go-docs-mcp .
-docker run -i --rm -v /path/to/your/documents:/documents go-docs-mcp
-```
-
-The image runs as a non-root user, includes poppler, tesseract (English data) and pandoc, and serves `/documents`.
-
-### From source
-
-```bash
-go install github.com/drolosoft/go-docs-mcp@latest
-```
-
-### Build locally
-
-```bash
-git clone https://github.com/drolosoft/go-docs-mcp.git
-cd go-docs-mcp
-make build      # produces ./go-docs-mcp
-make install    # installs to /usr/local/bin/
-```
+The Claude Code plugin, the release archives and how to check them, Docker,
+Claude Desktop and the commands for each package manager are in
+**[doc/install.md](doc/install.md)**.
 
 ---
 
 ## ⚙️ Configuration
 
-Go-Docs MCP reads documents from a configured directory. Set `DOCS_MCP_DIR` to change it:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DOCS_MCP_DIR` | `~/.docs-mcp/documents/` | Directory containing documents to serve |
-| `PDF_MCP_DIR` | _(legacy alias)_ | Backward-compatible alias for `DOCS_MCP_DIR` |
-| `DOCS_MCP_OCR_LANG` | `eng` | Tesseract language used when a call brings none |
-| `DOCS_MCP_CACHE_MB` | `256` | Upper bound of the in-memory text cache; least recently used documents are evicted first, `0` turns it off |
-| `DOCS_MCP_DISABLE_URL` | _(unset)_ | Set to `1` to remove the `read_url` tool |
-| `DOCS_MCP_URL_PROXY` | _(unset)_ | Set to `1` to let `read_url` honour `HTTP_PROXY`/`HTTPS_PROXY`. Off by default: with a proxy the connect-time address check cannot see the real target |
-
-Place your documents in the directory and the server finds them automatically. All supported formats are detected.
+The server reads the documents in `DOCS_MCP_DIR` (default `~/.docs-mcp/documents/`)
+and finds every supported file in it; files added while it runs show up on
+the next call. The other
+settings (OCR language, cache size, `read_url` switches) are listed in
+[doc/install.md](doc/install.md#-configuration).
 
 ### Resources
 
@@ -208,20 +148,9 @@ Or add it to the `.mcp.json` of the project you want it in:
 
 ### With Claude Desktop
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
-
-```json
-{
-  "mcpServers": {
-    "docs": {
-      "command": "/usr/local/bin/go-docs-mcp",
-      "env": {
-        "DOCS_MCP_DIR": "/path/to/your/documents"
-      }
-    }
-  }
-}
-```
+Claude Desktop needs the full path of the binary, and finds poppler, tesseract
+and pandoc only in some folders. The config and what to do when they are
+elsewhere are in [doc/install.md](doc/install.md#-claude-desktop).
 
 ### With any MCP client
 
@@ -499,12 +428,12 @@ Extracts text from an image file using OCR. Supports PNG, JPG, WebP, TIFF and BM
 
 ## 🔒 Security
 
-- **Confined to one directory** — every file is resolved with its symlinks and must end up inside `DOCS_MCP_DIR`. A symlink that points outside is not listed and cannot be read. Filenames with path separators or `../` are rejected before that.
-- **Extension filter** — only supported formats are served.
-- **Read-only** — the server never writes inside `DOCS_MCP_DIR`, and every tool is announced to clients as read-only, non-destructive and idempotent.
-- **Timeouts on every external process** — poppler, tesseract and pandoc run under a context deadline (60 s per extraction, 120 s per OCR page, 10 min per OCR call) and are killed when it passes. Page ranges are checked against the real page count and capped at 200 pages per call.
-- **`read_url`** — 60 s timeout, 50MB limit, `application/pdf` or `text/*` only, temp files removed right after reading. Hosts that resolve to private, loopback, link-local or cloud metadata addresses are refused, on the first request and on every redirect. Set `DOCS_MCP_DISABLE_URL=1` to drop the tool from the server if your documents may contain untrusted instructions. Environment proxies are ignored unless `DOCS_MCP_URL_PROXY=1`, because behind a proxy the connect-time check would judge the proxy, not the target.
-- **Bounded results** — text tools return pages of at most 200,000 characters, search shows at most 500 matches and images stop at 8 MB per call; any tool result over 9 MB is replaced with an error. The text cache is capped by `DOCS_MCP_CACHE_MB`.
+- **Confined to one directory:** every file is resolved with its symlinks and must end up inside `DOCS_MCP_DIR`. A symlink that points outside is not listed and cannot be read. Filenames with path separators or `../` are rejected before that.
+- **Extension filter:** only supported formats are served.
+- **Read-only:** the server never writes inside `DOCS_MCP_DIR`, and every tool is announced to clients as read-only, non-destructive and idempotent.
+- **Timeouts on every external process:** poppler, tesseract and pandoc run under a context deadline (60 s per extraction, 120 s per OCR page, 10 min per OCR call) and are killed when it passes. Page ranges are checked against the real page count and capped at 200 pages per call.
+- **`read_url`:** 60 s timeout, 50MB limit, `application/pdf` or `text/*` only, temp files removed right after reading. Hosts that resolve to private, loopback, link-local or cloud metadata addresses are refused, on the first request and on every redirect. Set `DOCS_MCP_DISABLE_URL=1` to drop the tool from the server if your documents may contain untrusted instructions. Environment proxies are ignored unless `DOCS_MCP_URL_PROXY=1`, because behind a proxy the connect-time check would judge the proxy, not the target.
+- **Bounded results:** text tools return pages of at most 200,000 characters, search shows at most 500 matches and images stop at 8 MB per call; any tool result over 9 MB is replaced with an error. The text cache is capped by `DOCS_MCP_CACHE_MB`.
 - **Error messages** carry file names, never absolute paths of the host.
 
 How to report a problem is in [SECURITY.md](SECURITY.md).
@@ -530,6 +459,10 @@ go-docs-mcp/
   internal/
     pdf/
       reader.go        # Document extraction, caching, search, metadata, images, OCR
+  doc/
+    formats.md         # What each format supports, limits of a call
+    install.md         # Install paths, Claude Desktop, env vars
+    WHY-MCP.md         # Why an MCP server and not a direct tool
   Makefile             # Build targets
   go.mod               # Module definition
 ```
@@ -558,4 +491,4 @@ go-docs-mcp/
 
 ---
 
-**[Drolosoft](https://drolosoft.com)** — *Tools we wish existed*
+**[Drolosoft](https://drolosoft.com)**: *Tools we wish existed*
