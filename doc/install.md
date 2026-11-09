@@ -48,13 +48,15 @@ the server yourself with `claude mcp add`, as shown in the
 Each [release](https://github.com/drolosoft/go-docs-mcp/releases) has five
 archives and a `checksums.txt`:
 
+`<version>` is the release number without the "v", `1.4.1` for instance.
+
 | Archive | System |
 |---------|--------|
-| `go-docs-mcp_1.4.0_darwin_arm64.tar.gz` | macOS, Apple silicon |
-| `go-docs-mcp_1.4.0_darwin_amd64.tar.gz` | macOS, Intel |
-| `go-docs-mcp_1.4.0_linux_amd64.tar.gz` | Linux, x86-64 |
-| `go-docs-mcp_1.4.0_linux_arm64.tar.gz` | Linux, ARM64 |
-| `go-docs-mcp_1.4.0_windows_amd64.zip` | Windows, x86-64 |
+| `go-docs-mcp_<version>_darwin_arm64.tar.gz` | macOS, Apple silicon |
+| `go-docs-mcp_<version>_darwin_amd64.tar.gz` | macOS, Intel |
+| `go-docs-mcp_<version>_linux_amd64.tar.gz` | Linux, x86-64 |
+| `go-docs-mcp_<version>_linux_arm64.tar.gz` | Linux, ARM64 |
+| `go-docs-mcp_<version>_windows_amd64.zip` | Windows, x86-64 |
 
 Each archive holds the `go-docs-mcp` binary (`go-docs-mcp.exe` on Windows),
 `LICENSE`, `README.md` and `CHANGELOG.md`. Download the archive and
@@ -62,9 +64,9 @@ Each archive holds the `go-docs-mcp` binary (`go-docs-mcp.exe` on Windows),
 
 ```bash
 shasum -a 256 -c --ignore-missing checksums.txt
-# go-docs-mcp_1.4.0_darwin_arm64.tar.gz: OK
+# go-docs-mcp_<version>_darwin_arm64.tar.gz: OK
 
-tar -xzf go-docs-mcp_1.4.0_darwin_arm64.tar.gz
+tar -xzf go-docs-mcp_<version>_darwin_arm64.tar.gz
 sudo mv go-docs-mcp /usr/local/bin/
 ```
 
@@ -79,7 +81,7 @@ Install poppler, tesseract and pandoc separately (see
 Needs Go 1.27.3 or later.
 
 ```bash
-go install github.com/drolosoft/go-docs-mcp@v1.4.0
+go install github.com/drolosoft/go-docs-mcp@latest
 ```
 
 The binary goes to `$(go env GOPATH)/bin`, usually `~/go/bin`. Install the

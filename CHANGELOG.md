@@ -6,6 +6,11 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `doc/install.md` names the release archives without a fixed version, so
+  the page does not go stale on each release.
+
 ## [v1.4.1] - 2026-11-09
 
 Documentation and listings. The server itself is the same as v1.4.0.
