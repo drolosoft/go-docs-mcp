@@ -68,3 +68,56 @@ jobs:
           args: release --clean --release-notes ${{ runner.temp }}/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Lists the new version in the official MCP Registry once the binaries are
+  # out. server.json carries no package (the registry has no type for a plain
+  # GitHub release binary), so the entry is metadata that points at the
+  # repository. GitHub OIDC proves the drolosoft namespace without a secret.
+  publish-registry:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # Pinned on purpose, as the registry docs ask: bump it by hand after
+      # reading the mcp-publisher release notes.
+      MCP_PUBLISHER_VERSION: v1.8.1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      # The archive is checked against the registry's own release workflow
+      # signature before it runs with an OIDC token.
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+
+      # The tag is the version, so server.json cannot publish a stale number
+      # when someone forgets to bump it. "v1.5.0" becomes "1.5.0".
+      - name: Set the version in server.json from the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          jq --arg version "${TAG#v}" '.version = $version' server.json > "$RUNNER_TEMP/server.json"
+          mv "$RUNNER_TEMP/server.json" server.json
+          ./mcp-publisher validate
+
+      - name: Log in to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to the MCP Registry
+        run: ./mcp-publisher publish
