@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Repository metadata, a social preview image and `server.json` updated
+  for the registries. `glama.json` already had the only field Glama's
+  schema defines (`maintainers`).
+- The release workflow publishes `server.json` to the official MCP
+  Registry after GoReleaser, with the version taken from the tag.
+
 ## [v1.4.0] - 2026-11-08
 
 Formats, paging and distribution. Every v1.3.0 call still works; the new
