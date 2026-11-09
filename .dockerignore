@@ -1,0 +1,16 @@
+# Only the Go sources reach the build stage. Git metadata, release output and
+# images are left out so the context stays small and a dirty dist/ never
+# lands in the image.
+.git
+.github
+.claude
+dist
+assets
+documents
+go-docs-mcp
+*.mcpb
+*.test
+*.out
+*.prof
+.env
+.env.local

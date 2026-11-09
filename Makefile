@@ -1,4 +1,4 @@
-.PHONY: build install test clean fmt vet vuln check snapshot manifest mcpb docker
+.PHONY: build install test clean fmt vet vuln check snapshot manifest mcpb docker docker-smoke docker-multiarch
 
 build:
 	go build -o go-docs-mcp .
@@ -37,8 +37,22 @@ mcpb:
 	goreleaser release --snapshot --clean --skip=publish
 	npx -y @anthropic-ai/mcpb@2.1.2 validate dist/mcpb
 
+# The version the image reports. A plain local build says "dev"; pass the
+# release number to check what the published image will say.
+VERSION ?=
+
 docker:
-	docker build -t go-docs-mcp .
+	docker build --build-arg VERSION=$(VERSION) -t go-docs-mcp .
+
+# Builds the image for this machine and talks MCP to it over stdin with a PDF,
+# a DOCX and a PNG mounted read-only. Run it before tagging a release.
+docker-smoke:
+	scripts/docker-smoke.sh $(or $(VERSION),0.0.0-smoke)
+
+# Proves both release architectures build (the other one under QEMU). Nothing
+# is pushed or loaded.
+docker-multiarch:
+	docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=$(VERSION) .
 
 clean:
 	rm -rf go-docs-mcp dist

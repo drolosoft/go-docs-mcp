@@ -101,23 +101,50 @@ make install    # /usr/local/bin/go-docs-mcp
 
 ## 🐳 Docker
 
-There is no published image. Build it from a clone of the repository:
+From v1.5.0 every release publishes a multi-arch image (`linux/amd64` and
+`linux/arm64`) to the GitHub Container Registry, tagged with the version
+without the `v` and with `latest`:
 
 ```bash
-docker build -t go-docs-mcp .
-docker run -i --rm -v /path/to/your/documents:/documents:ro go-docs-mcp
+docker run -i --rm -v /path/to/your/documents:/documents:ro ghcr.io/drolosoft/go-docs-mcp:latest
 ```
 
-The image is Alpine with poppler, tesseract with the English language data
-only, and pandoc. It runs as a non-root user and serves `/documents`. The
-server never writes into that folder, so it can be mounted read-only. A binary
-built this way reports its version as `dev`.
+`-i` keeps stdin open, which is where MCP talks to the server; `--rm` removes
+the container when the client closes it. The image is Alpine with poppler,
+tesseract with the English and Spanish language data, and pandoc. It runs as
+a non-root user and serves `/documents`. The server never writes into that
+folder, so it can be mounted read-only. It reports the release version in
+`serverInfo`.
+
+OCR reads English unless the call names a language. To make Spanish the
+default, or to read both, set `DOCS_MCP_OCR_LANG`:
+
+```bash
+docker run -i --rm -e DOCS_MCP_OCR_LANG=eng+spa \
+  -v /path/to/your/documents:/documents:ro ghcr.io/drolosoft/go-docs-mcp:latest
+```
+
+Other languages need their tesseract data, which the image does not carry.
+Build your own image from it and add the Alpine package, for example
+`tesseract-ocr-data-fra` for French. The other settings in
+[Configuration](#-configuration) are passed the same way, with `-e`.
 
 To use the image from Claude Code:
 
 ```bash
-claude mcp add docs -- docker run -i --rm -v /path/to/your/documents:/documents:ro go-docs-mcp
+claude mcp add docs -- docker run -i --rm -v /path/to/your/documents:/documents:ro ghcr.io/drolosoft/go-docs-mcp:latest
 ```
+
+To build it from a clone of the repository instead:
+
+```bash
+docker build --build-arg VERSION=<version> -t go-docs-mcp .
+```
+
+`<version>` is the number the binary reports, without the `v`; without
+the argument it reports `dev`.
+`scripts/docker-smoke.sh` builds the image for your machine and checks it over
+MCP with a PDF, a DOCX and a PNG mounted read-only.
 
 ---
 
