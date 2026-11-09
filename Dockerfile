@@ -1,4 +1,9 @@
-FROM golang:1.27-alpine AS build
+# The build stage runs on the builder's own platform and cross-compiles, which
+# is safe because the binary is pure Go (CGO_ENABLED=0). Only the final stage
+# runs under QEMU in a multi-arch build, and it just installs packages.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -8,7 +13,7 @@ COPY . .
 # reports "dev". -buildvcs=false keeps a git worktree (where .git is a file
 # that points outside the context) from breaking the build.
 ARG VERSION=
-RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -buildvcs=false \
     -ldflags="-s -w -X main.linkedVersion=${VERSION}" -o /go-docs-mcp .
 
 FROM alpine:3.21
