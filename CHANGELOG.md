@@ -6,8 +6,37 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v1.5.0] - 2026-11-09
+
+Two new ways to install, both listed in the official MCP Registry, so a
+client that reads the registry can install the server and not only find it.
+
+### Added
+
+- Claude Desktop bundle: each release ships `go-docs-mcp_<version>.mcpb`, one
+  file for macOS, Windows and Linux with the five release binaries. It
+  installs with a double click or from Settings › Extensions › Install
+  extension, and asks for the documents folder. It is listed in
+  `checksums.txt`. poppler, tesseract and pandoc are still separate programs
+  (see `doc/install.md`).
+- A Docker image, `ghcr.io/drolosoft/go-docs-mcp`, for `linux/amd64` and
+  `linux/arm64`, tagged with the version (without the `v`) and `latest`.
+  It brings poppler, tesseract and pandoc, so there is nothing else to
+  install: mount your documents folder on `/documents`.
+- The image has the Spanish OCR model next to the English one.
+  `DOCS_MCP_OCR_LANG=spa` or `eng+spa` makes Spanish the default.
+- The MCP Registry entry declares both as packages (`mcpb` and `oci`).
+- `mcpb/manifest.json`, whose tools are generated from the server's own
+  `tools/list` (`make manifest`); a test fails when the two differ.
+  `make mcpb` builds a local snapshot of the release with the bundle, and
+  `make docker-smoke VERSION=x.y.z` checks an image over MCP with a PDF, a
+  DOCX and a PNG mounted read-only.
+
 ### Changed
 
+- The Docker image reports the release version in `serverInfo` instead of
+  `dev`, and carries the OCI labels (title, description, source, licenses,
+  version).
 - `doc/install.md` names the release archives without a fixed version, so
   the page does not go stale on each release.
 
@@ -159,7 +188,8 @@ changed its parameters; clients that worked with v1.2.0 keep working.
 Initial public releases: 12 tools over PDF, TXT, MD, CSV, DOCX and images,
 stdio transport, mtime cache, OCR fallback with tesseract.
 
-[Unreleased]: https://github.com/drolosoft/go-docs-mcp/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/drolosoft/go-docs-mcp/compare/v1.5.0...HEAD
+[v1.5.0]: https://github.com/drolosoft/go-docs-mcp/compare/v1.4.1...v1.5.0
 [v1.4.1]: https://github.com/drolosoft/go-docs-mcp/compare/v1.4.0...v1.4.1
 [v1.4.0]: https://github.com/drolosoft/go-docs-mcp/compare/v1.3.0...v1.4.0
 [v1.3.0]: https://github.com/drolosoft/go-docs-mcp/compare/v1.2.0...v1.3.0

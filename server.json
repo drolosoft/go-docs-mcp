@@ -3,7 +3,7 @@
   "name": "io.github.drolosoft/go-docs-mcp",
   "title": "go-docs-mcp",
   "description": "Lets your AI read PDF, Office files, EPUB, HTML, Jupyter and images, with OCR, search and paging.",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "repository": {
     "url": "https://github.com/drolosoft/go-docs-mcp",
     "source": "github"
@@ -18,7 +18,113 @@
       ]
     }
   ],
-  "packages": [],
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/drolosoft/go-docs-mcp/releases/download/v1.5.0/go-docs-mcp_1.5.0.mcpb",
+      "version": "1.5.0",
+      "fileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DOCS_MCP_DIR",
+          "description": "Folder with the documents to serve.",
+          "format": "filepath",
+          "isRequired": true
+        },
+        {
+          "name": "DOCS_MCP_OCR_LANG",
+          "description": "Tesseract language for OCR, for example spa or eng+spa.",
+          "default": "eng",
+          "isRequired": false
+        },
+        {
+          "name": "DOCS_MCP_DISABLE_URL",
+          "description": "true removes the read_url tool.",
+          "format": "boolean",
+          "default": "false",
+          "isRequired": false
+        }
+      ]
+    },
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/drolosoft/go-docs-mcp:1.5.0",
+      "runtimeHint": "docker",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "-i",
+          "description": "Keep stdin open: MCP talks to the server over it"
+        },
+        {
+          "type": "positional",
+          "value": "--rm",
+          "description": "Remove the container when the client closes it"
+        },
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "{documents_dir}:/documents:ro",
+          "description": "Folder with your documents, mounted read-only on /documents, the folder the server reads",
+          "isRequired": true,
+          "variables": {
+            "documents_dir": {
+              "description": "Absolute path of the folder with your documents",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "-e",
+          "value": "DOCS_MCP_OCR_LANG={ocr_language}",
+          "description": "Tesseract language for OCR when a call names none. The image has eng and spa; eng+spa reads both. Default eng.",
+          "isRequired": false,
+          "variables": {
+            "ocr_language": {
+              "description": "eng, spa or eng+spa",
+              "default": "eng",
+              "isRequired": false
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "-e",
+          "value": "DOCS_MCP_DISABLE_URL={disable_url}",
+          "description": "Set to 1 to remove the read_url tool, so the server never reaches the network.",
+          "isRequired": false,
+          "variables": {
+            "disable_url": {
+              "format": "boolean",
+              "isRequired": false
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "-e",
+          "value": "DOCS_MCP_CACHE_MB={cache_mb}",
+          "description": "Cap of the extracted text cache in MB. Default 256, 0 disables it.",
+          "isRequired": false,
+          "variables": {
+            "cache_mb": {
+              "format": "number",
+              "default": "256",
+              "isRequired": false
+            }
+          }
+        }
+      ]
+    }
+  ],
   "_meta": {
     "io.modelcontextprotocol.registry/publisher-provided": {
       "install": {

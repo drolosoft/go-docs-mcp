@@ -39,6 +39,12 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      # The bundle's manifest is checked with the MCPB CLI before anything is
+      # published; the Test step above already compared its tools with the
+      # server's tools/list.
+      - name: Validate the MCPB manifest
+        run: npx --yes @anthropic-ai/mcpb@2.1.2 validate mcpb/manifest.json
+
       # Take the "## [vX.Y.Z]" section of CHANGELOG.md, up to the next
       # "## [" heading. The file goes to the runner's temp dir, because a new
       # file inside the checkout would make GoReleaser refuse a dirty tree.
@@ -69,12 +75,89 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Lists the new version in the official MCP Registry once the binaries are
-  # out. server.json carries no package (the registry has no type for a plain
-  # GitHub release binary), so the entry is metadata that points at the
-  # repository. GitHub OIDC proves the drolosoft namespace without a secret.
-  publish-registry:
+  # Publishes ghcr.io/drolosoft/go-docs-mcp for linux/amd64 and linux/arm64,
+  # tagged with the version without the "v" and with "latest". It runs after
+  # GoReleaser, so a tag whose tests fail publishes no image either.
+  docker:
     needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # "v1.5.0" becomes "1.5.0": the image tag, the OCI version label and the
+      # version the binary reports in serverInfo all use the bare number.
+      - name: Version from the tag
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # The Go binary is cross-compiled on the runner; QEMU only runs the
+      # arm64 stage that installs poppler, tesseract and pandoc.
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Annotations go on the manifests and on the index: the GHCR package
+      # page reads the description of a multi-arch image from the index, and
+      # labels only reach the per-platform configs. A pre-release tag such as
+      # v1.5.0-rc.1 does not move "latest".
+      - id: meta
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ steps.version.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The published amd64 image, pulled back from GHCR, must report the tag
+      # and read a PDF, a DOCX and a PNG before the registry lists it.
+      - name: Smoke the published image
+        run: scripts/docker-smoke.sh "${{ steps.version.outputs.version }}" "$IMAGE:${{ steps.version.outputs.version }}"
+
+      # The MCP Registry reads the image anonymously and refuses a private
+      # one, and GHCR makes the first push of a package private. Failing here
+      # skips publish-registry with a message that says what to click; after
+      # the click, "Re-run failed jobs" pushes the same tag again and publishes.
+      - name: Check the package is public
+        run: |
+          if ! curl -fsS -o /dev/null "https://ghcr.io/token?scope=repository:${{ github.repository }}:pull"; then
+            echo "::error::$IMAGE is private. Make it public at https://github.com/orgs/drolosoft/packages/container/go-docs-mcp/settings (Danger Zone, Change visibility), then re-run the failed jobs."
+            exit 1
+          fi
+          docker logout ghcr.io
+          docker buildx imagetools inspect "$IMAGE:${{ steps.version.outputs.version }}" --format '{{json .Image}}' |
+            jq -e '."linux/amd64".config.Labels."io.modelcontextprotocol.server.name" == "io.github.drolosoft/go-docs-mcp"'
+
+  # Lists the new version in the official MCP Registry once the release and
+  # the image are out, with the .mcpb bundle and the GHCR image as its
+  # packages. GitHub OIDC proves the drolosoft namespace without a secret.
+  publish-registry:
+    needs: [release, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -106,13 +189,39 @@ jobs:
           tar xzf "$archive" mcp-publisher
           rm -f "$archive" "$archive.sigstore.json"
 
+      # checksums.txt of this release holds the sha256 of the .mcpb bundle,
+      # which the registry requires in fileSha256.
+      - name: Download checksums.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern checksums.txt --dir "$RUNNER_TEMP"
+
       # The tag is the version, so server.json cannot publish a stale number
-      # when someone forgets to bump it. "v1.5.0" becomes "1.5.0".
-      - name: Set the version in server.json from the tag
+      # or a stale bundle. "v1.5.0" becomes "1.5.0"; the mcpb package gets the
+      # URL and the sha256 of go-docs-mcp_1.5.0.mcpb from this release, and
+      # the oci package the image tag of the same version.
+      - name: Set the version and the packages in server.json from the tag
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          jq --arg version "${TAG#v}" '.version = $version' server.json > "$RUNNER_TEMP/server.json"
+          set -euo pipefail
+          version="${TAG#v}"
+          asset="go-docs-mcp_${version}.mcpb"
+          jq --arg version "$version" \
+             --arg asset "$asset" \
+             --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${asset}" \
+             --rawfile checksums "$RUNNER_TEMP/checksums.txt" '
+            ($checksums | split("\n") | map(select(length > 0) | split("  ")) | map({(.[1]): .[0]}) | add) as $sums
+            | if $sums[$asset] == null then error("checksums.txt has no line for \($asset)") else . end
+            | .version = $version
+            | .packages |= map(
+                if .registryType == "mcpb"
+                then .identifier = $url | .version = $version | .fileSha256 = $sums[$asset]
+                elif .registryType == "oci"
+                then .identifier = (.identifier | sub(":[^:/]+$"; ":" + $version))
+                else . end)
+          ' server.json > "$RUNNER_TEMP/server.json"
           mv "$RUNNER_TEMP/server.json" server.json
           ./mcp-publisher validate
 

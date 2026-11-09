@@ -97,8 +97,21 @@ brew install drolosoft/tap/go-docs-mcp   # macOS and Linux, brings poppler, tess
 Or, with Go 1.27.3 or later, `go install github.com/drolosoft/go-docs-mcp@latest`
 and install poppler (plus tesseract and pandoc if you need them) yourself.
 
-The Claude Code plugin, the release archives and how to check them, Docker,
-Claude Desktop and the commands for each package manager are in
+Two more ways, both listed in the official MCP Registry:
+
+- **Claude Desktop, one click.** Download `go-docs-mcp_<version>.mcpb` from
+  the [latest release](https://github.com/drolosoft/go-docs-mcp/releases/latest)
+  and open it. It asks for your documents folder. poppler, tesseract and
+  pandoc still come from your system (`brew install poppler tesseract pandoc`).
+- **Docker, nothing to install.** The image brings poppler, tesseract
+  (English and Spanish) and pandoc:
+
+  ```bash
+  docker run -i --rm -v /path/to/your/documents:/documents:ro ghcr.io/drolosoft/go-docs-mcp
+  ```
+
+The Claude Code plugin, the release archives and how to check them, the
+settings of each of these and the commands for each package manager are in
 **[doc/install.md](doc/install.md)**.
 
 ---
