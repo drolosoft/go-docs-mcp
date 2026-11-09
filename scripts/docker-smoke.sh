@@ -204,8 +204,11 @@ expect_text() {
 
 command -v jq >/dev/null || fail "jq is needed to read the answers"
 
+# A published image may not be on this machine yet; a local tag is used as is.
 if [ -z "$image" ]; then
 	build_image
+elif ! docker image inspect "$image" >/dev/null 2>&1; then
+	docker pull --quiet "$image" >/dev/null
 fi
 
 labels="$(docker inspect --format '{{json .Config.Labels}}' "$image")"
