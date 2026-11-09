@@ -89,11 +89,12 @@ never guesses the format from the file name.
   `convert_to_markdown` to see the headings and tables of these files.
 
 The installed pandoc must have the reader for the format. Distribution
-packages can be old: Ubuntu's pandoc has no `xlsx` or `pptx` reader. The server
-asks `pandoc --list-input-formats` once, the first time it needs it, and
-`list_formats` reports each pandoc format as installed only when that reader is
-there. A file whose reader is missing gets an error that says so. After
-installing a newer pandoc, restart the server so it asks again.
+packages can be old: Ubuntu's pandoc has no `xlsx` or `pptx` reader.
+
+The server asks `pandoc --list-input-formats` once, the first time it needs
+it. `list_formats` reports each pandoc format as installed only when that
+reader is there, and a file whose reader is missing gets an error that says
+so. After installing a newer pandoc, restart the server so it asks again.
 
 ---
 
