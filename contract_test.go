@@ -2,8 +2,9 @@ package main
 
 // Contract tests: the real binary, over stdio, on both MCP protocol eras.
 //
-// MCP 2026-07-28 removed the initialize handshake; earlier clients (Claude
-// Desktop, Cowork, Claude Code as of mid-2026) still open with `initialize`.
+// MCP 2026-07-28 removed the initialize handshake; clients built before it
+// still open with `initialize`, and newer ones (Claude Code 2.1.321, for
+// one) no longer send it.
 // A server must serve both from one process ("dual-era"). These tests build
 // the actual binary, spawn it exactly as an MCP client would, and drive it
 // three ways: forcing the legacy handshake, letting the client negotiate

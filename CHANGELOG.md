@@ -6,6 +6,24 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Tests, CI and documentation. The binary behaves as in v1.5.0.
+
+### Added
+
+- `raw_wire_test.go`: the real binary driven over stdio with JSON-RPC
+  written by hand and only the standard library on the client side. It
+  checks the `initialize` handshake on the four legacy revisions and the
+  fallback to `2025-11-25`, `server/discover`, tools and resources with the
+  `2026-07-28` envelope and no handshake, the errors for an incomplete
+  envelope (`-32602`) and an unknown revision (`-32022`), the same tool
+  definitions in both eras, and `ocr_document` progress in both eras. Any
+  mcp-go upgrade must pass it unchanged.
+- CI runs every Monday at 06:00 UTC and can be started by hand. The new
+  `next-sdk-radar` job runs the era tests against the newest mcp-go, never
+  blocks, and leaves `go.mod` as it is.
+- `doc/MCP-2026-07-28.md`: what the binary answers in each protocol era,
+  how it is tested, and the results with independent clients.
+
 ## [v1.5.0] - 2026-11-09
 
 Two new ways to install, both listed in the official MCP Registry, so a

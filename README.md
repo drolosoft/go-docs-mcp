@@ -463,6 +463,8 @@ make clean     # Remove build artifacts
 
 CI runs gofmt, vet, the race tests with poppler, tesseract and pandoc installed, and govulncheck on every push. A tag `v*` builds the release archives with goreleaser. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+How the binary serves both MCP protocol eras (the `initialize` handshake and the stateless `2026-07-28` revision) and how that is tested: **[doc/MCP-2026-07-28.md](doc/MCP-2026-07-28.md)**.
+
 ### Project structure
 
 ```
@@ -475,6 +477,7 @@ go-docs-mcp/
   doc/
     formats.md         # What each format supports, limits of a call
     install.md         # Install paths, Claude Desktop, env vars
+    MCP-2026-07-28.md  # Both protocol eras and how they are tested
     WHY-MCP.md         # Why an MCP server and not a direct tool
   Makefile             # Build targets
   go.mod               # Module definition

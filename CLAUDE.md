@@ -33,6 +33,7 @@ DOCS_MCP_DIR=~/docs ./go-docs-mcp   # custom dir
 - URL downloads: 60 s timeout, 50MB cap, `application/pdf` or `text/*`, private/loopback/link-local hosts refused on every hop
 - Image extraction: `pdfimages -list` first, only rows of type `image` (soft masks skipped), extracted as PNM (not `-png`: poppler's PNG writer is the slow part) and decoded in Go, box-filtered to 1600 px, 4 MB per image, `max_images` (default 10) and 8 MB per answer
 - Tool results over 9 MB are replaced with an error (`server.WithToolResultSizeLimit`)
+- Dual-era: one binary serves the legacy `initialize` handshake and the stateless MCP 2026-07-28 (`_meta` envelope, `server/discover`), all from mcp-go v1.5.0, no era branch in our code; `raw_wire_test.go` is the arbiter, any mcp-go bump must pass it unchanged (`doc/MCP-2026-07-28.md`)
 - Supports: PDF, TXT, MD, CSV, and through pandoc DOCX, XLSX, PPTX, ODT, EPUB, HTML, RTF, IPYNB; images (PNG, JPG, WebP, TIFF, BMP) with tesseract
 
 ## Tools
@@ -61,6 +62,7 @@ DOCS_MCP_DIR=~/docs ./go-docs-mcp   # custom dir
 
 ## CI and release
 
-- `.github/workflows/ci.yml`: gofmt, vet, `go test -race -cover` with poppler, tesseract and pandoc installed, govulncheck; Ubuntu and macOS.
+- `.github/workflows/ci.yml`: gofmt, vet, `go test -race -cover` with poppler, tesseract and pandoc installed, govulncheck; Ubuntu and macOS. Weekly (Monday 06:00 UTC, also manual) `next-sdk-radar` runs the era tests against the newest mcp-go, `continue-on-error`.
+- Era tests: `contract_test.go` (mcp-go client, legacy / pinned / auto) and `raw_wire_test.go` (`TestRawWire*`, stdlib JSON-RPC, no SDK); both spawn the real binary built once in `TestMain`.
 - `.github/workflows/release.yml`: goreleaser on tag `v*`, notes from the matching CHANGELOG section.
 - Homebrew formula lives in `drolosoft/homebrew-tap`; the Claude Code plugin in `drolosoft/claude-plugins`.
