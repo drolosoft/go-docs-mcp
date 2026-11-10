@@ -6,6 +6,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A weekly run, Monday 06:00 UTC, so a new mcp-go release that breaks one
+  # of the protocol eras is found by the radar job below, not by whoever
+  # bumps go.mod next. It can also be started by hand.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -82,3 +88,42 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+  # There is no floor job. go.mod pins the exact mcp-go version and Go builds
+  # with that version and no other, so the floor and the ceiling are the same
+  # module, and the linux and macos jobs already test it.
+  #
+  # Early warning only: the server serves both MCP protocol eras (the legacy
+  # initialize handshake and the stateless 2026-07-28 one), and these tests
+  # pin both on the wire. This job tries them against the newest mcp-go, so a
+  # release that breaks an era shows up before anyone bumps go.mod. It commits
+  # nothing and never blocks anything.
+  next-sdk-radar:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The upgrade only lives in this runner's checkout; go.mod in the
+      # repository stays where it is.
+      - name: Move to the newest mcp-go
+        run: |
+          go get github.com/mark3labs/mcp-go@latest
+          go mod tidy
+
+      # Name the resolved SDK in the log so a scheduled failure points at the
+      # culprit release straight away.
+      - name: Show resolved mcp-go
+        run: go list -m github.com/mark3labs/mcp-go
+
+      # The core cases of these tests touch only Markdown and plain text, so
+      # poppler, tesseract and pandoc are not installed here.
+      - name: Era tests against the newest mcp-go
+        run: go test . -run 'TestRawWire|TestLegacyHandshakeClient|TestModernPinnedClient|TestAutoNegotiatingClient' -count=1
