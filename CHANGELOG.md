@@ -6,7 +6,7 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Tests, CI and documentation. The binary behaves as in v1.5.0.
+Tests, CI and documentation for the two MCP protocol eras, and one fix.
 
 ### Added
 
@@ -23,6 +23,14 @@ Tests, CI and documentation. The binary behaves as in v1.5.0.
   blocks, and leaves `go.mod` as it is.
 - `doc/MCP-2026-07-28.md`: what the binary answers in each protocol era,
   how it is tested, and the results with independent clients.
+- `scripts/crosscheck-python-client/run.sh`: the same check with the Python
+  MCP SDK 2.x as client, in its legacy, `2026-07-28` and auto modes. Run by
+  hand; it needs `go` and `uv`.
+
+### Fixed
+
+- `list_documents` on an empty directory printed `null` in its text block
+  while the structured content said `[]`. Both are an empty list now.
 
 ## [v1.5.0] - 2026-11-09
 
