@@ -314,9 +314,13 @@ func registerListDocuments(s *server.MCPServer, reader *pdf.Reader) {
 			return mcp.NewToolResultError(fmt.Sprintf("Error listing documents: %v", err)), nil
 		}
 
-		structured := documentList{Documents: nonNil(docs)}
+		// An empty directory gives a nil slice, which would print as "null"
+		// in the text block while the structured list says []; nonNil keeps
+		// both as an empty list.
+		found := nonNil(docs)
+		structured := documentList{Documents: found}
 
-		return structuredResult(structured, docs), nil
+		return structuredResult(structured, found), nil
 	})
 }
 

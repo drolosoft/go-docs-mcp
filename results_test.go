@@ -345,3 +345,20 @@ func TestExtractImages_PagePastTheEndIsAnError(t *testing.T) {
 		t.Errorf("page 2 of a one-page PDF must be an error result, got %+v", result.Content)
 	}
 }
+
+// TestListDocuments_EmptyDirectoryPrintsAnEmptyList checks the text block of
+// list_documents when there is nothing to list. A client that reads only the
+// text parses it as JSON and iterates it, so it must be "[]" like the
+// structured list, never "null".
+func TestListDocuments_EmptyDirectoryPrintsAnEmptyList(t *testing.T) {
+	mcpServer, _ := newTestServer(t)
+
+	result := callToolMayFail(t, mcpServer, "list_documents", map[string]any{})
+
+	if result.IsError {
+		t.Fatalf("list_documents failed: %+v", result.Content)
+	}
+	if got := result.Content[0].Text; got != "[]" {
+		t.Errorf("text block of an empty directory = %q, want %q", got, "[]")
+	}
+}
