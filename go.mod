@@ -2,7 +2,7 @@ module github.com/drolosoft/go-docs-mcp
 
 go 1.27.3
 
-require github.com/mark3labs/mcp-go v1.5.0
+require github.com/mark3labs/mcp-go v1.6.0
 
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
